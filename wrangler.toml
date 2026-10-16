@@ -26,7 +26,7 @@ SL_MARGIN_PCT = "0.053"   # stop loss = 5.3% of margin (0.66% price move)
 TRAIL = "1"               # 1 = trailing stop on, 0 = fixed stop only
 TRAIL_START_PCT = "0.08"  # trailing starts after 8% of margin profit (1% price move)
 TRAIL_DIST_PCT = "0.06"   # then follows 6% of margin (0.75% price) behind the best price
-MIN_SCORE = "5"           # minimum rating out of 8 (5 = STRONG, 7 = VERY STRONG)
+MIN_SCORE = "0"           # 0 = trade every coin that crossed on the last candle; 5 = STRONG only, 7 = VERY STRONG only
 MAX_POSITIONS = "60"      # slots = 60 x 1 USDT = 60 USDT total funds; profits are split evenly across them
 MAX_SYMBOLS = "60"        # coins scanned
 
