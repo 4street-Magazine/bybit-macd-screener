@@ -20,12 +20,17 @@ SCREEN_BATCH = "35"       # coins scanned per run
 SIM_CHECK_BATCH = "10"    # open positions re-checked per run
 MAX_SYMBOLS = "60"        # coins watched
 MAX_POSITIONS = "22"      # open positions at once
-SIM_MARGIN = "2.72"       # margin per position (USDT); start funds = 2.72 x 22 = 59.84 USDT
+POSITION_SIZE = "10"      # every position = 10 USDT size (margin 1 USDT at 10x, 0.5 at 20x)
+SIM_MARGIN = "1"          # start funds = 1 x 22 = 22 USDT
 
-LEV_LOW = "10"            # market cap under the threshold (or unknown)
-LEV_HIGH = "20"           # market cap at/above the threshold
-CAP_THRESHOLD = "100000000"
+LEV_FOLLOW = "30"         # coins that follow BTC
+LEV_OTHER = "10"          # all other coins
+BTC_CORR = "0.6"          # follower = return correlation with BTC of 0.6 or more
+CORR_BARS = "100"         # candles used for the correlation
 
+TPSL_MODE = "size"        # "size" = % of position size, "atr" = volatility-scaled
+TP_SIZE_PCT = "0.16"      # take profit = 16% of position size
+SL_SIZE_PCT = "0.053"     # stop loss = 5.3% of position size
 SL_ATR = "1.5"            # stop = 1.5 x ATR
 RR_MIN = "1.5"            # reward:risk at rating 0
 RR_MAX = "3"              # reward:risk at rating 8
