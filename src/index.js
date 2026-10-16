@@ -6,6 +6,7 @@
  *   and SHORT (crossed down). Each cross is rated VERY STRONG / STRONG / MODERATE / WEAK using
  *   ADX (trend strength), the 200-EMA, the MACD zero line, cross sharpness and RSI.
  *   Times are shown in EAT (UTC+3).
+ * MODE "sim": leveraged PAPER trades opened from the screener's rated crosses (fake money).
  * MODE "trade": the MACD stop-and-reverse PAPER trader (fake money).
  *
  * - Cron trigger. State lives in Workers KV.
@@ -23,7 +24,7 @@ const OKX_HOST = "https://www.okx.com";
 
 const DEFAULTS = {
   GRANULARITY: 900,           // bar size in seconds: 900 (15m), 3600, 14400, 86400
-  MODE: "screen",             // "screen" = dashboard screener only, "trade" = paper trading
+  MODE: "screen",             // "screen" = screener only, "sim" = leveraged paper trades from screener signals, "trade" = old MACD paper bot
   SCREEN_BATCH: 40,           // coins scanned per run (free plan: max 50 subrequests per run)
   START_CASH: 10000,
   FEE: 0.001,
@@ -44,6 +45,19 @@ const DEFAULTS = {
   MIN_QUOTE_VOLUME: 1000000,  // skip coins trading under $1M/day
   UNIVERSE_REFRESH_H: 6,
   KLINE_LIMIT: 300,
+
+  // --- MODE "sim": leveraged paper trades driven by the screener ---
+  LEVERAGE: 8,
+  SIM_MARGIN: 1,              // starting margin per position (USDT); notional = margin x leverage
+  TP_MARGIN_PCT: 0.16,        // take profit = 16% of margin  (= 2% price move at 8x)
+  SL_MARGIN_PCT: 0.053,       // stop loss   = 5.3% of margin (= 0.66% price move at 8x)
+  MIN_SCORE: 5,               // minimum screener rating (0-8) to enter. 5 = STRONG, 7 = VERY STRONG
+  TRAIL: 1,                   // 1 = trailing stop on, 0 = fixed stop only
+  TRAIL_START_PCT: 0.08,      // trailing begins once the trade has been 8% of margin in profit (1% price move)
+  TRAIL_DIST_PCT: 0.06,       // then the stop follows 6% of margin (0.75% price) behind the best price, never loosening
+  SIM_FEE: 0.0005,            // per side, on notional (OKX taker is about 0.05%)
+  SIM_SLIP: 0.0003,           // slippage per fill
+  SIM_CHECK_BATCH: 25,        // max open positions whose candles are re-fetched per run
 };
 
 const STABLES = new Set(["USDC", "FDUSD", "TUSD", "USDP", "DAI", "USDT", "EUR", "AEUR", "XUSD", "USD1", "PYUSD"]);
@@ -424,6 +438,147 @@ function screenData(s, cfg, age, now = nowSec()) {
   };
 }
 
+// ========================= LEVERAGED SIM (MODE "sim") =========================
+// Every screener cross on the last closed candle that rates >= MIN_SCORE opens a position at the live
+// price. Exits are TP / SL only. When a trade wins, its net profit is split evenly across all
+// MAX_POSITIONS slots, so every future position's margin grows by profit / MAX_POSITIONS.
+function newSim(cfg) {
+  const start = cfg.SIM_MARGIN * cfg.MAX_POSITIONS;
+  return { start, cash: start, base: cfg.SIM_MARGIN, pos: {}, closed: [], events: [], curve: [], mark: {},
+    lastCross: {}, stats: { n: 0, wins: 0, gw: 0, gl: 0 }, peak: start, startedAt: nowSec() };
+}
+
+function simEquity(sim) {
+  return Object.entries(sim.pos).reduce((e, [k, p]) => {
+    const px = sim.mark[k] ?? p.entry;
+    return e + Math.max(0, p.margin + p.side * (px - p.entry) * p.qty);
+  }, sim.cash);
+}
+
+function simEvent(sim, kind, sym, t, info) {
+  sim.events.unshift({ kind, sym, t, info });
+  if (sim.events.length > 40) sim.events.length = 40;
+}
+
+function simOpen(cfg, sim, sym, side, price, t, rt) {
+  if (sim.pos[sym] || Object.keys(sim.pos).length >= cfg.MAX_POSITIONS) return false;
+  const fill = price * (1 + side * cfg.SIM_SLIP);
+  const margin = Math.min(sim.base, sim.cash / (1 + cfg.LEVERAGE * cfg.SIM_FEE));
+  if (margin < 0.05) return false;
+  const notional = margin * cfg.LEVERAGE, qty = notional / fill, fee = notional * cfg.SIM_FEE;
+  sim.cash -= margin + fee;
+  sim.pos[sym] = { side, qty, entry: fill, best: fill, margin, fee, t, chk: Math.floor(t / cfg.GRANULARITY) * cfg.GRANULARITY, label: rt.label, score: rt.score, adx: rt.adx, rsi: rt.rsi,
+    tp: fill * (1 + (side * cfg.TP_MARGIN_PCT) / cfg.LEVERAGE), sl: fill * (1 - (side * cfg.SL_MARGIN_PCT) / cfg.LEVERAGE) };
+  sim.mark[sym] = price;
+  simEvent(sim, "OPEN " + SIDE(side), sym, t, `${rt.label} ${rt.score}/8, margin $${margin.toFixed(3)}, ${cfg.LEVERAGE}x`);
+  return true;
+}
+
+function simClose(cfg, sim, sym, fill, t, reason) {
+  const p = sim.pos[sym];
+  delete sim.pos[sym];
+  delete sim.mark[sym];
+  const gross = p.side * (fill - p.entry) * p.qty;
+  const exitFee = p.qty * fill * cfg.SIM_FEE;
+  sim.cash += Math.max(0, p.margin + gross - exitFee);
+  const pnl = gross - exitFee - p.fee, pct = pnl / p.margin;
+  sim.closed.push({ sym, side: p.side, tIn: p.t, tOut: t, entry: p.entry, exit: fill, margin: p.margin, pnl, pct, reason, label: p.label, score: p.score });
+  if (sim.closed.length > 300) sim.closed.shift();
+  const st = sim.stats;
+  st.n++;
+  if (pnl > 0) { st.wins++; st.gw += pnl; sim.base += pnl / cfg.MAX_POSITIONS; } else st.gl += -pnl;
+  simEvent(sim, "CLOSE " + SIDE(p.side), sym, t, `${reason}, P&L ${pnl >= 0 ? "+" : ""}${pnl.toFixed(4)} (${(pct * 100).toFixed(1)}% of margin)`);
+}
+
+/** Trailing stop: after a bar that did not exit, pull the stop up (long) / down (short) behind the best price. */
+function simTrail(cfg, p, h, l) {
+  if (!cfg.TRAIL) return;
+  if (p.side > 0) p.best = Math.max(p.best, h); else p.best = Math.min(p.best, l);
+  const peak = p.side * (p.best / p.entry - 1) * cfg.LEVERAGE;        // best profit so far, as a fraction of margin
+  if (peak < cfg.TRAIL_START_PCT) return;                               // not in enough profit yet: keep the fixed stop
+  const sl = p.best * (1 - (p.side * cfg.TRAIL_DIST_PCT) / cfg.LEVERAGE);
+  if (p.side > 0 ? sl > p.sl : sl < p.sl) p.sl = sl;
+}
+
+/** Did this bar (or live price, with o=h=l) hit the stop or target? Stop wins if both hit. */
+function simExit(cfg, p, o, h, l) {
+  const s = p.side;
+  if (s > 0 ? l <= p.sl : h >= p.sl) return { px: (s > 0 ? Math.min(o, p.sl) : Math.max(o, p.sl)) * (1 - s * cfg.SIM_SLIP), reason: "stop loss" };
+  if (s > 0 ? h >= p.tp : l <= p.tp) return { px: s > 0 ? Math.max(o, p.tp) : Math.min(o, p.tp), reason: "take profit" };
+  return null;
+}
+
+async function simStep(cfg, s, prices, now) {
+  const sim = s.sim, gran = cfg.GRANULARITY;
+  const latest = Math.floor(now / gran) * gran - gran;
+
+  // 1) exits: replay closed candles after the entry candle, then check the live price
+  // Only positions with a newly closed candle need their candles re-fetched, oldest-checked first and
+  // capped per run so 60 open positions can't blow the 50-subrequest limit. The live-price check below
+  // still covers every position on every run.
+  const syms = Object.keys(sim.pos)
+    .filter((k) => (sim.pos[k].chk || 0) < latest)
+    .sort((a, b) => (sim.pos[a].chk || 0) - (sim.pos[b].chk || 0))
+    .slice(0, cfg.SIM_CHECK_BATCH);
+  const klines = {};
+  await mapLimit(syms, 4, async (sym) => {
+    try { klines[sym] = await fetchKlines(cfg, sym, now); } catch (e) { s.lastError = `sim klines ${sym}: ${e.message}`; }
+  });
+  for (const sym of syms) {
+    let p = sim.pos[sym];
+    const entryBar = Math.floor(p.t / gran) * gran;
+    for (const k of klines[sym] || []) {
+      if (!p || k[0] <= entryBar) continue;
+      const x = simExit(cfg, p, k[3], k[2], k[1]);   // candle = [t, low, high, open, close, vol]
+      if (x) { simClose(cfg, sim, sym, x.px, k[0] + gran, x.reason); p = null; }
+      else simTrail(cfg, p, k[2], k[1]);
+    }
+    if (sim.pos[sym] && klines[sym]) sim.pos[sym].chk = latest;
+  }
+  for (const sym of Object.keys(sim.pos)) {
+    const p = sim.pos[sym], px = prices[sym];
+    if (!px) continue;
+    const x = simExit(cfg, p, px, px, px);
+    if (x) simClose(cfg, sim, sym, x.px, now, x.reason + " (live)");
+    else { sim.mark[sym] = px; simTrail(cfg, p, px, px); }
+  }
+
+  // 2) entries: crosses on the latest closed candle that meet the minimum rating
+  const cands = [];
+  for (const [sym, r] of Object.entries(s.screen)) {
+    if (!s.universe.includes(sym) || sim.pos[sym] || !prices[sym]) continue;
+    const age = r.age + Math.round((latest - r.barT) / gran);
+    if (age !== 1 || r.score == null || r.score < cfg.MIN_SCORE || r.crossT <= (sim.lastCross[sym] || 0)) continue;
+    cands.push({ sym, r });
+  }
+  cands.sort((a, b) => b.r.score - a.r.score || b.r.vol - a.r.vol);
+  for (const { sym, r } of cands) {
+    if (simOpen(cfg, sim, sym, r.side, prices[sym], now, r)) sim.lastCross[sym] = r.crossT;
+  }
+  for (const k of Object.keys(sim.lastCross)) if (sim.lastCross[k] < now - 86400) delete sim.lastCross[k];
+
+  const eq = simEquity(sim);
+  sim.peak = Math.max(sim.peak, eq);
+  const lastPt = sim.curve[sim.curve.length - 1];
+  if (!lastPt || now - lastPt[0] >= 900) { sim.curve.push([now, eq]); if (sim.curve.length > 700) sim.curve.shift(); }
+}
+
+function simSummary(s, cfg) {
+  const sim = s.sim || newSim(cfg), st = sim.stats, eq = simEquity(sim);
+  return {
+    mode: "sim", leverage: cfg.LEVERAGE, minScore: cfg.MIN_SCORE,
+    equity: eq, start: sim.start, returnPct: (eq / sim.start - 1) * 100, cash: sim.cash,
+    marginPerPosition: sim.base, drawdownPct: (1 - eq / sim.peak) * 100,
+    openPositions: Object.entries(sim.pos).map(([sym, p]) => {
+      const px = sim.mark[sym];
+      return { sym, side: SIDE(p.side), entry: p.entry, price: px, tp: p.tp, sl: p.sl, margin: p.margin, rating: `${p.label} ${p.score}/8`,
+        pnlPctOfMargin: px ? p.side * (px / p.entry - 1) * cfg.LEVERAGE * 100 : null };
+    }),
+    trades: { count: st.n, winRate: st.n ? st.wins / st.n : null, profitFactor: st.gl > 0 ? st.gw / st.gl : null },
+    lastTick: s.lastTick, lastError: s.lastError,
+  };
+}
+
 // =============================== TICK ===============================
 async function loadState(env, cfg) {
   const saved = await env.BOT_KV.get("state", "json");
@@ -444,6 +599,14 @@ async function tick(env) {
 
   if (Object.keys(volumes).length && (!s.universe.length || now - s.universeAt > cfg.UNIVERSE_REFRESH_H * 3600)) {
     try { await refreshUniverse(env, cfg, s, now, volumes); } catch (e) { s.lastError = "universe: " + e.message; }
+  }
+
+  if (cfg.MODE === "sim") {
+    if (!s.sim) s.sim = newSim(cfg);
+    await screenScan(cfg, s, volumes, now, lastClosedOpen);
+    await simStep(cfg, s, prices, now);
+    await env.BOT_KV.put("state", JSON.stringify(s));
+    return simSummary(s, cfg);
   }
 
   if (cfg.MODE !== "trade") {
@@ -577,6 +740,34 @@ ${d.lastError ? `<div class="warn">Last error: ${esc(d.lastError)}</div>` : ""}
 <div class="mute" style="font-size:12px">${esc(d.note)}. Screener only: no trades are placed. Educational, not financial advice.</div></div></body></html>`;
 }
 
+function simPage(s, cfg) {
+  const sim = s.sim || newSim(cfg), m = simSummary(s, cfg);
+  const f = (n, d = 4) => (n < 0 ? "-" : "") + "$" + Math.abs(n).toFixed(d);
+  const rows = m.openPositions.map((p) => `<tr><td><b>${esc(p.sym.replace("USDT", ""))}</b></td><td class="${p.side === "LONG" ? "up" : "down"}">${p.side}</td>
+    <td>${num(p.entry)}<br><span class="mute small">TP ${num(p.tp)} · SL ${num(p.sl)}</span></td><td>${p.price ? num(p.price) : "-"}</td>
+    <td class="${clr(p.pnlPctOfMargin)}">${p.pnlPctOfMargin == null ? "-" : p.pnlPctOfMargin.toFixed(1) + "%"}</td><td class="mute small">${esc(p.rating)}</td></tr>`).join("")
+    || `<tr><td colspan="6" class="mute">No open positions</td></tr>`;
+  const trades = sim.closed.slice(-15).reverse().map((t) => `<tr><td>${esc(t.sym.replace("USDT", ""))}</td><td>${t.side > 0 ? "LONG" : "SHORT"}</td>
+    <td class="${clr(t.pnl)}">${f(t.pnl)}<br><span class="mute small">${(t.pct * 100).toFixed(1)}% of margin</span></td><td class="mute small">${esc(t.reason)}<br>${esc(t.label)} ${t.score}/8 · ${hhmm(t.tOut)} EAT</td></tr>`).join("")
+    || `<tr><td colspan="4" class="mute">No closed trades yet</td></tr>`;
+  const events = sim.events.slice(0, 10).map((e) => `<li><b>${esc(e.kind)}</b> ${esc(e.sym.replace("USDT", ""))} <span class="mute">${esc(e.info)}</span></li>`).join("");
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="60">
+<title>MACD Leverage Sim</title><style>${STYLE}</style></head><body><div class="wrap">
+<h1>MACD Screener Sim · ${cfg.LEVERAGE}x paper trades</h1>
+<div class="mute">Fake money · enters ${cfg.MIN_SCORE}+/8 crosses · TP ${(cfg.TP_MARGIN_PCT * 100).toFixed(1)}% / SL ${(cfg.SL_MARGIN_PCT * 100).toFixed(1)}% of margin${cfg.TRAIL ? `, then trails ${(cfg.TRAIL_DIST_PCT * 100).toFixed(0)}% behind after +${(cfg.TRAIL_START_PCT * 100).toFixed(0)}%` : ""} · updated ${ago(s.lastTick)}</div>
+${m.lastError ? `<div class="warn">Last error: ${esc(m.lastError)}</div>` : ""}
+<div class="card"><div class="grid"><div><div class="mute">Equity (started ${f(m.start, 2)})</div><div class="big">${f(m.equity)}</div></div>
+<div><div class="mute">Return</div><div class="big ${clr(m.returnPct)}">${m.returnPct.toFixed(2)}%</div></div>
+<div><div class="mute">Margin per new position</div>${f(m.marginPerPosition)} <span class="mute">(${f(m.marginPerPosition * cfg.LEVERAGE)} size)</span></div>
+<div><div class="mute">Drawdown</div>${m.drawdownPct.toFixed(2)}%</div></div>${sparkline(sim.curve)}</div>
+<div class="card"><h2>OPEN POSITIONS (${m.openPositions.length}/${cfg.MAX_POSITIONS})</h2><div class="scroll"><table><tr><th>Coin</th><th>Side</th><th>Entry</th><th>Now</th><th>P&amp;L</th><th>Rating</th></tr>${rows}</table></div></div>
+<div class="card"><h2>CLOSED TRADES · ${m.trades.count} total${m.trades.winRate != null ? ` · ${(m.trades.winRate * 100).toFixed(0)}% win · PF ${m.trades.profitFactor ? m.trades.profitFactor.toFixed(2) : "∞"}` : ""}</h2>
+<div class="scroll"><table><tr><th>Coin</th><th>Side</th><th>P&amp;L</th><th>Exit</th></tr>${trades}</table></div></div>
+<div class="card"><h2>RECENT EVENTS</h2><ul>${events || '<li class="mute">Nothing yet</li>'}</ul></div>
+<div class="mute" style="font-size:12px"><a href="?view=screen" style="color:inherit">Open the screener</a> · Simulation only: fees ${(cfg.SIM_FEE * 100).toFixed(2)}%/side, slippage ${(cfg.SIM_SLIP * 100).toFixed(2)}%, no funding. Educational, not financial advice.</div></div></body></html>`;
+}
+
 function page(s, cfg) {
   const m = summary(s, cfg);
   const rows = m.openPositions.map((p) => `<tr><td>${esc(p.sym.replace("USDT", ""))}</td><td class="${p.side === "LONG" ? "up" : "down"}">${p.side}</td><td>${num(p.entry)}</td><td>${p.price ? num(p.price) : "-"}</td>
@@ -626,11 +817,18 @@ export default {
 
     const s = await loadState(env, cfg);
     const age = Math.min(MAX_CROSS_AGE, Math.max(1, parseInt(url.searchParams.get("age") || "1", 10) || 1));
+    if (cfg.MODE === "sim") {
+      if (url.pathname === "/api/screen") return json(screenData(s, cfg, age));
+      if (url.pathname === "/api/status") return json(simSummary(s, cfg));
+      if (url.pathname === "/api/trades") return json(s.sim ? s.sim.closed : []);
+    }
     if (cfg.MODE !== "trade" && (url.pathname === "/api/screen" || url.pathname === "/api/status")) return json(screenData(s, cfg, age));
     if (url.pathname === "/api/status") return json(summary(s, cfg));
     if (url.pathname === "/api/trades") return json(s.closed);
     if (url.pathname === "/api/universe") return json({ source: s.universeSource, note: s.universeNote, symbols: s.universe });
-    const html = cfg.MODE === "trade" ? page(s, cfg) : screenPage(s, cfg, age);
+    const html = cfg.MODE === "trade" ? page(s, cfg)
+      : cfg.MODE === "sim" && url.searchParams.get("view") !== "screen" ? simPage(s, cfg)
+      : screenPage(s, cfg, age);
     return new Response(html, { headers: { "content-type": "text/html;charset=utf-8" } });
   },
 };
