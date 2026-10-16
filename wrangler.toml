@@ -1,1 +1,31 @@
 
+name = "bybit-macd-screener"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+
+# Runs every 5 minutes
+[triggers]
+crons = ["*/5 * * * *"]
+
+# Create with:  npx wrangler kv namespace create BOT_KV
+# then paste the returned id below
+[[kv_namespaces]]
+binding = "BOT_KV"
+id = "PASTE_YOUR_KV_ID_HERE"
+
+[vars]
+# "auto" reads Bybit's official Innovation Zone flag (public API, no key needed).
+# If it finds nothing, the bot uses SYMBOLS below instead.
+UNIVERSE_MODE = "auto"
+# Fallback list, comma separated, e.g. "ABC,XYZ,FOO"
+SYMBOLS = ""
+
+# Optional overrides (defaults live at the top of src/index.js):
+# MODE = "screen"              # "screen" = screener only (default), "trade" = MACD paper trading
+# SCREEN_SCOPE = "innovation"  # "all" = scan every liquid USDT spot pair, not just Innovation Zone
+# MAX_SYMBOLS = "60"           # coins watched (raise with SCREEN_SCOPE = "all")
+# SCREEN_BATCH = "40"          # coins scanned per 5-min run. Free plan: keep <= 40.
+#                              # Paid plan can use ~400 so a big universe finishes within one candle.
+# GRANULARITY = "900"          # 900 = 15m. Also: 3600 (1h), 14400 (4h)
+# MIN_QUOTE_VOLUME = "1000000" # skip coins with under $1M 24h volume
+# DATA_HOST = "https://api.bytick.com"   # use if api.bybit.com is blocked from your Worker
