@@ -44,6 +44,7 @@ const DEFAULTS = {
   LEV_FOLLOW: 30,             // leverage for coins that follow BTC
   LEV_OTHER: 10,              // leverage for everything else
   FOLLOWERS: "",              // comma list of coins always treated as BTC followers, e.g. "DOGE,PEPE,SHIB"
+  FOLLOWERS_ONLY: 1,          // 1 = scan and trade only BTC followers
   BTC_CORR: 0.6,              // a coin "follows BTC" when its return correlation with BTC is at least this
   CORR_BARS: 100,             // candles used for the correlation
   POSITION_MARGIN: 1,         // every position uses this much margin (USDT); size = margin x leverage. 0 = compounding margin
@@ -432,7 +433,11 @@ async function screenScan(cfg, s, volumes, now, lastClosedOpen) {
       s.btc = { bar: lastClosedOpen, c: Object.fromEntries(bk.map((k) => [k[0], k[4]])) };
     } catch (e) { s.lastError = "btc: " + e.message; }
   }
-  const need = s.universe.filter((sym) => (s.screenBar[sym] || 0) < lastClosedOpen).slice(0, cfg.SCREEN_BATCH);
+  // FOLLOWERS_ONLY: scan listed followers and coins with high BTC correlation. Unknown coins are scanned once
+  // to measure correlation; known non-followers are only rechecked about once an hour.
+  const fset = forced(cfg);
+  const want = (sym) => !cfg.FOLLOWERS_ONLY || fset.has(sym) || s.corr[sym] == null || s.corr[sym] >= cfg.BTC_CORR || (s.screenBar[sym] || 0) < lastClosedOpen - 12 * cfg.GRANULARITY;
+  const need = s.universe.filter((sym) => want(sym) && (s.screenBar[sym] || 0) < lastClosedOpen).slice(0, cfg.SCREEN_BATCH);
   const klines = {};
   await mapLimit(need, 4, async (sym) => {
     try { klines[sym] = await fetchKlines(cfg, sym, now); }
@@ -460,7 +465,7 @@ async function screenScan(cfg, s, volumes, now, lastClosedOpen) {
 function screenData(s, cfg, age, now = nowSec()) {
   const gran = cfg.GRANULARITY, latest = Math.floor(now / gran) * gran - gran;
   const rows = Object.entries(s.screen)
-    .filter(([sym]) => s.universe.includes(sym))
+    .filter(([sym, r]) => s.universe.includes(sym) && (!cfg.FOLLOWERS_ONLY || isFollower(cfg, r, sym)))
     .map(([sym, r]) => ({ sym, ...r, iz: !!s.zone[sym], age: r.age + Math.round((latest - r.barT) / gran) }))
     .filter((r) => r.age <= age)
     .sort((a, b) => a.age - b.age || (b.score ?? -1) - (a.score ?? -1) || b.vol - a.vol);
@@ -619,6 +624,7 @@ async function simStep(cfg, s, prices, now) {
   const cands = [];
   for (const [sym, r] of Object.entries(s.screen)) {
     if (!s.universe.includes(sym) || sim.pos[sym] || !prices[sym]) continue;
+    if (cfg.FOLLOWERS_ONLY && !isFollower(cfg, r, sym)) continue;
     const age = r.age + Math.round((latest - r.barT) / gran);
     if (age !== 1 || r.score == null || r.score < cfg.MIN_SCORE || r.crossT <= (sim.lastCross[sym] || 0)) continue;
     cands.push({ sym, r });
@@ -859,7 +865,7 @@ function simPage(s, cfg, tab = "sim", age = 1) {
 <meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="60">
 <title>MACD Leverage Sim</title><style>${STYLE}</style></head><body><div class="wrap">
 <h1>MACD Screener Sim · ${cfg.LEV_OTHER}x / ${cfg.LEV_FOLLOW}x paper trades</h1>
-<div class="mute">Fake money · ${cfg.GRANULARITY / 60}m candles · ${cfg.MIN_SCORE > 0 ? `enters ${cfg.MIN_SCORE}+/8 crosses` : "trades every cross on the last candle"} · ${cfg.LEV_FOLLOW}x for BTC followers (corr ≥ ${cfg.BTC_CORR}), else ${cfg.LEV_OTHER}x · ${tpHeader}${cfg.TRAIL ? `, trailing (gives back max ${(cfg.TRAIL_GIVEBACK * 100).toFixed(0)}%)` : ""} · updated ${ago(s.lastTick)}</div>
+<div class="mute">Fake money · ${cfg.GRANULARITY / 60}m candles · ${cfg.FOLLOWERS_ONLY ? "BTC followers only · " : ""}${cfg.MIN_SCORE > 0 ? `enters ${cfg.MIN_SCORE}+/8 crosses` : "trades every cross on the last candle"} · ${cfg.LEV_FOLLOW}x for BTC followers (corr ≥ ${cfg.BTC_CORR}), else ${cfg.LEV_OTHER}x · ${tpHeader}${cfg.TRAIL ? `, trailing (gives back max ${(cfg.TRAIL_GIVEBACK * 100).toFixed(0)}%)` : ""} · updated ${ago(s.lastTick)}</div>
 ${m.lastError ? `<div class="warn">Last error: ${esc(m.lastError)}</div>` : ""}
 <div class="card tabs"><a href="?tab=sim" class="${tab === "sim" ? "on" : ""}">Sim trades (${m.openPositions.length} open)</a><a href="?tab=coins" class="${tab === "coins" ? "on" : ""}">Coins (${scr.long.length + scr.short.length} crossed)</a><a href="?tab=btc" class="${tab === "btc" ? "on" : ""}">BTC list</a></div>
 ${tab === "btc" ? followersCard(s, cfg) : tab === "coins" ? `<div class="card tabs"><div class="mute small" style="margin-bottom:8px">Scanned ${scr.scanned}/${scr.total} coins for the ${hhmm(scr.latestCandleOpen + cfg.GRANULARITY)} EAT candle close. Coins that crossed on the last closed candle get a trade; the others are shown for reference.</div>${[1, 2, 3].map((n) => `<a href="?tab=coins&age=${n}" class="${n === age ? "on" : ""}">${n === 1 ? "Last candle" : "≤ " + n + " candles"}</a>`).join("")}</div>
