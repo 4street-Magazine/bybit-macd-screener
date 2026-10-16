@@ -42,6 +42,7 @@ const DEFAULTS = {
   // --- MODE "sim" ---
   LEV_FOLLOW: 30,             // leverage for coins that follow BTC
   LEV_OTHER: 10,              // leverage for everything else
+  FOLLOWERS: "",              // comma list of coins always treated as BTC followers, e.g. "DOGE,PEPE,SHIB"
   BTC_CORR: 0.6,              // a coin "follows BTC" when its return correlation with BTC is at least this
   CORR_BARS: 100,             // candles used for the correlation
   POSITION_SIZE: 10,          // every position is this many USDT of size (margin = size / leverage). 0 = use SIM_MARGIN instead
@@ -375,8 +376,10 @@ function btcCorr(kl, btcMap, n) {
 }
 
 /** 30x for BTC followers, 10x for the rest. */
-const isFollower = (cfg, r) => r.corr != null && r.corr >= cfg.BTC_CORR;
-const levFor = (cfg, r) => (isFollower(cfg, r) ? cfg.LEV_FOLLOW : cfg.LEV_OTHER);
+const forced = (cfg) => new Set(String(cfg.FOLLOWERS || "").split(",").map((x) => x.trim().toUpperCase()).filter(Boolean).map((x) => (x.endsWith("USDT") ? x : x + "USDT")));
+/** A coin is a follower if it is in the FOLLOWERS list, or its BTC correlation is high enough. */
+const isFollower = (cfg, r, sym) => forced(cfg).has(sym) || (r.corr != null && r.corr >= cfg.BTC_CORR);
+const levFor = (cfg, r, sym) => (isFollower(cfg, r, sym) ? cfg.LEV_FOLLOW : cfg.LEV_OTHER);
 
 async function discoverPairs() {
   const list = await okx("/api/v5/public/instruments", { instType: "SPOT" });
@@ -517,7 +520,7 @@ function simOpen(cfg, sim, sym, side, price, t, rt, lev) {
   const rr = tpMove / slMove;
 
   sim.pos[sym] = {
-    side, qty, entry: fill, best: fill, margin, fee, t, lev, btc: isFollower(cfg, rt), corr: rt.corr ?? null,
+    side, qty, entry: fill, best: fill, margin, fee, t, lev, btc: isFollower(cfg, rt, sym), corr: rt.corr ?? null,
     chk: Math.floor(t / cfg.GRANULARITY) * cfg.GRANULARITY,
     label: rt.label, score: rt.score, adx: rt.adx, rsi: rt.rsi,
     tp: fill * (1 + side * tpMove), sl: fill * (1 - side * slMove),
@@ -525,7 +528,7 @@ function simOpen(cfg, sim, sym, side, price, t, rt, lev) {
   };
   sim.mark[sym] = price;
   simEvent(sim, "OPEN " + SIDE(side), sym, t,
-    `${rt.label} ${rt.score}/8, ${lev}x${isFollower(cfg, rt) ? " BTC-follower" : ""}, margin ${margin.toFixed(3)} USDT, size ${notional.toFixed(2)} USDT, SL ${(slMove * 100).toFixed(2)}% TP ${(tpMove * 100).toFixed(2)}% (${rr.toFixed(1)}R)`);
+    `${rt.label} ${rt.score}/8, ${lev}x${isFollower(cfg, rt, sym) ? " BTC-follower" : ""}, margin ${margin.toFixed(3)} USDT, size ${notional.toFixed(2)} USDT, SL ${(slMove * 100).toFixed(2)}% TP ${(tpMove * 100).toFixed(2)}% (${rr.toFixed(1)}R)`);
   return true;
 }
 
@@ -606,7 +609,7 @@ async function simStep(cfg, s, prices, now) {
   }
   cands.sort((a, b) => b.r.score - a.r.score || b.r.vol - a.r.vol);
   for (const { sym, r } of cands) {
-    if (simOpen(cfg, sim, sym, r.side, prices[sym], now, r, levFor(cfg, r))) sim.lastCross[sym] = r.crossT;
+    if (simOpen(cfg, sim, sym, r.side, prices[sym], now, r, levFor(cfg, r, sym))) sim.lastCross[sym] = r.crossT;
   }
   for (const k of Object.keys(sim.lastCross)) if (sim.lastCross[k] < now - 86400) delete sim.lastCross[k];
 
@@ -779,7 +782,7 @@ function ratingCell(r) {
 function screenTables(d, cfg) {
   const ageTxt = (r) => (r.age === 1 ? "last candle" : `${r.age} candles ago`);
   const tbl = (rows, cls) => `<div class="scroll"><table><tr><th>Coin</th><th>Crossed</th><th>Rating</th><th>Price</th><th>24h vol</th></tr>${
-    rows.map((r) => `<tr><td><b>${esc(r.sym.replace("USDT", ""))}</b>${r.iz ? ' <span class="tag">IZ</span>' : ""}${isFollower(cfg, r) ? ` <span class="tag">BTC ${cfg.LEV_FOLLOW}x</span>` : ""}${r.corr != null ? `<br><span class="mute small">BTC corr ${r.corr.toFixed(2)}</span>` : ""}</td>
+    rows.map((r) => `<tr><td><b>${esc(r.sym.replace("USDT", ""))}</b>${r.iz ? ' <span class="tag">IZ</span>' : ""}${isFollower(cfg, r, r.sym) ? ` <span class="tag">BTC ${cfg.LEV_FOLLOW}x</span>` : ""}${r.corr != null ? `<br><span class="mute small">BTC corr ${r.corr.toFixed(2)}</span>` : ""}</td>
       <td class="${cls}">${hhmm(r.crossT + cfg.GRANULARITY)} EAT<br><span class="mute">${ageTxt(r)}</span></td>
       <td class="${cls}">${ratingCell(r)}</td>
       <td>${num(r.price)}</td><td>${usd(r.vol)}</td></tr>`).join("")
@@ -792,7 +795,8 @@ function screenTables(d, cfg) {
 function followerData(s, cfg) {
   const rows = s.universe.map((sym) => {
     const corr = s.corr && s.corr[sym] != null ? s.corr[sym] : null;
-    return { sym, corr, follower: corr != null && corr >= cfg.BTC_CORR, leverage: corr != null && corr >= cfg.BTC_CORR ? cfg.LEV_FOLLOW : cfg.LEV_OTHER };
+    const follower = isFollower(cfg, { corr }, sym);
+    return { sym, corr, follower, forced: forced(cfg).has(sym), leverage: follower ? cfg.LEV_FOLLOW : cfg.LEV_OTHER };
   }).sort((a, b) => (b.corr ?? -2) - (a.corr ?? -2));
   return { threshold: cfg.BTC_CORR, followers: rows.filter((r) => r.follower).length, total: rows.length, coins: rows };
 }
@@ -800,7 +804,7 @@ function followerData(s, cfg) {
 function followersCard(s, cfg) {
   const d = followerData(s, cfg);
   const rows = d.coins.map((r) => `<tr><td><b>${esc(r.sym.replace("USDT", ""))}</b></td><td>${r.corr == null ? "-" : r.corr.toFixed(2)}</td>
-    <td class="${r.follower ? "up" : ""}">${r.corr == null ? "not scanned yet" : r.follower ? "BTC follower" : "other"}</td><td>${r.corr == null ? "-" : r.leverage + "x"}</td></tr>`).join("");
+    <td class="${r.follower ? "up" : ""}">${r.forced ? "BTC follower (list)" : r.corr == null ? "not scanned yet" : r.follower ? "BTC follower" : "other"}</td><td>${r.corr == null && !r.forced ? "-" : r.leverage + "x"}</td></tr>`).join("");
   return `<div class="card"><h2>BTC FOLLOWERS · ${d.followers} of ${d.total} (correlation ≥ ${d.threshold})</h2>
 <div class="mute small" style="margin-bottom:8px">Correlation of ${cfg.GRANULARITY / 60}m returns with BTC over the last ${cfg.CORR_BARS} candles. 1.00 = moves exactly with BTC, 0 = unrelated. Change BTC_CORR to move the line.</div>
 <div class="scroll"><table><tr><th>Coin</th><th>BTC corr</th><th>Type</th><th>Leverage</th></tr>${rows}</table></div></div>`;
