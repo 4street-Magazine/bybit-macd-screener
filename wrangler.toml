@@ -32,4 +32,5 @@ RR_MAX = "3"              # reward:risk at rating 8
 MIN_SL_PCT = "0.0035"
 MAX_SL_MARGIN = "0.30"
 TRAIL = "1"
+TRAIL_GIVEBACK = "0.4"    # give back at most 40% of the best profit
 MIN_SCORE = "5"           # 5 = STRONG only, 0 = every cross
