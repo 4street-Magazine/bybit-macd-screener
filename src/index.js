@@ -536,10 +536,9 @@ function simOpen(cfg, sim, sym, side, price, t, rt, lev) {
 
   // TP_USDT: price move that gives +TP_USDT NET profit (entry fee + estimated exit fee included).
   // The position is not closed there: the retracing stop starts trailing from this level.
-  let trailStart = tpMove * 0.5;
+  let trailStart = 0; // Activated immediately upon position placement
   if (cfg.TP_USDT > 0) {
     tpMove = (cfg.TP_USDT + fee + notional * cfg.SIM_FEE) / notional;
-    trailStart = tpMove;
   }
   const rr = tpMove / slMove;
 
@@ -551,7 +550,7 @@ function simOpen(cfg, sim, sym, side, price, t, rt, lev) {
     ts: trailStart, td: slMove, rr, trailing: false,
   };
   sim.mark[sym] = price;
-  const tpTxt = cfg.TP_USDT > 0 ? `trail starts at +${cfg.TP_USDT} USDT net (${(tpMove * 100).toFixed(2)}% move)` : `TP ${(tpMove * 100).toFixed(2)}% (${rr.toFixed(1)}R)`;
+  const tpTxt = cfg.TP_USDT > 0 ? `trail starts immediately (net target +${cfg.TP_USDT} USDT, move ${(tpMove * 100).toFixed(2)}%)` : `TP ${(tpMove * 100).toFixed(2)}% (${rr.toFixed(1)}R)`;
   simEvent(sim, "OPEN " + SIDE(side), sym, t,
     `${rt.label} ${rt.score}/8, ${lev}x${isFollower(cfg, rt, sym) ? " BTC-follower" : ""}, margin ${margin.toFixed(3)} USDT, size ${notional.toFixed(2)} USDT, SL ${(slMove * 100).toFixed(2)}%, ${tpTxt}`);
   return true;
@@ -869,7 +868,7 @@ function simPage(s, cfg, tab = "sim", age = 1) {
     || `<tr><td colspan="6" class="mute">No open positions</td></tr>`;
   const events = sim.events.slice(0, 10).map((e) => `<li><b>${esc(e.kind)}</b> ${esc(e.sym.replace("USDT", ""))} <span class="mute">${esc(e.info)}</span></li>`).join("");
   const tpHeader = cfg.TP_USDT > 0
-    ? `retracing stop starts at +${cfg.TP_USDT} USDT net, SL ${(cfg.SL_SIZE_PCT * 100).toFixed(1)}% of size`
+    ? `retracing stop starts immediately, SL ${(cfg.SL_SIZE_PCT * 100).toFixed(1)}% of size`
     : cfg.TPSL_MODE === "size" ? `TP ${(cfg.TP_SIZE_PCT * 100).toFixed(1)}% / SL ${(cfg.SL_SIZE_PCT * 100).toFixed(1)}% of position size` : `stop ${cfg.SL_ATR}×ATR, target ${cfg.RR_MIN}-${cfg.RR_MAX}R by rating`;
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="60">
@@ -878,13 +877,13 @@ function simPage(s, cfg, tab = "sim", age = 1) {
 <div class="mute">Fake money · ${cfg.GRANULARITY / 60}m candles · ${cfg.FOLLOWERS_ONLY ? "BTC followers only · " : ""}${cfg.MIN_SCORE > 0 ? `enters ${cfg.MIN_SCORE}+/8 crosses` : "trades every cross on the last candle"} · ${cfg.LEV_FOLLOW}x for BTC followers (corr ≥ ${cfg.BTC_CORR}), else ${cfg.LEV_OTHER}x · ${tpHeader}${cfg.TRAIL ? `, trailing (gives back max ${(cfg.TRAIL_GIVEBACK * 100).toFixed(0)}%)` : ""} · updated ${ago(s.lastTick)}</div>
 ${m.lastError ? `<div class="warn">Last error: ${esc(m.lastError)}</div>` : ""}
 <div class="card tabs"><a href="?tab=sim" class="${tab === "sim" ? "on" : ""}">Sim trades (${m.openPositions.length} open)</a><a href="?tab=coins" class="${tab === "coins" ? "on" : ""}">Coins (${scr.long.length + scr.short.length} crossed)</a><a href="?tab=btc" class="${tab === "btc" ? "on" : ""}">BTC list</a></div>
-${tab === "btc" ? followersCard(s, cfg) : tab === "coins" ? `<div class="card tabs"><div class="mute small" style="margin-bottom:8px">Scanned ${scr.scanned}/${scr.total} coins for the ${hhmm(scr.latestCandleOpen + cfg.GRANULARITY)} EAT candle close. Coins that crossed on the last closed candle get a trade; the others are shown for reference.</div>${[1, 2, 3].map((n) => `<a href="?tab=coins&age=${n}" class="${n === age ? "on" : ""}">${n === 1 ? "Last candle" : "≤ " + n + " candles"}</a>`).join("")}</div>
+${tab === "btc" ? followersCard(s, cfg) : tab === "coins" ? `<div class="card tabs"><div class="mute small" style="margin-bottom:8px">Scanned ${scr.scanned}/${scr.total} coins for the${hhmm(scr.latestCandleOpen + cfg.GRANULARITY)} EAT candle close. Coins that crossed on the last closed candle get a trade; the others are shown for reference.</div>${[1, 2, 3].map((n) => `<a href="?tab=coins&age=${n}" class="${n === age ? "on" : ""}">${n === 1 ? "Last candle" : "≤ " + n + " candles"}</a>`).join("")}</div>
 ${screenTables(scr, cfg)}` : `<div class="card"><div class="grid">
 <div><div class="mute">Total P&amp;L (real, after fees)</div><div class="big ${clr(m.totalPnlUsdt)}">${usdt(m.totalPnlUsdt, 4)}</div></div>
 <div><div class="mute">Equity (started ${usdtPlain(m.start)})</div><div class="big">${usdtPlain(m.equity, 4)}</div></div>
 <div><div class="mute">Realized (closed trades)</div><span class="${clr(m.realizedPnlUsdt)}">${usdt(m.realizedPnlUsdt)}</span></div>
 <div><div class="mute">Unrealized (open positions)</div><span class="${clr(m.unrealizedPnlUsdt)}">${usdt(m.unrealizedPnlUsdt)}</span></div>
-<div><div class="mute">Margin per position</div>${usdtPlain(cfg.POSITION_MARGIN > 0 ? cfg.POSITION_MARGIN : m.marginPerPosition, 2)} <span class="mute small">(${cfg.LEV_OTHER}x = ${((cfg.POSITION_MARGIN > 0 ? cfg.POSITION_MARGIN : m.marginPerPosition) * cfg.LEV_OTHER).toFixed(0)}, ${cfg.LEV_FOLLOW}x = ${((cfg.POSITION_MARGIN > 0 ? cfg.POSITION_MARGIN : m.marginPerPosition) * cfg.LEV_FOLLOW).toFixed(0)} USDT size)</span></div>
+<div><div class="mute">Margin per position</div>${usdtPlain(cfg.POSITION_MARGIN > 0 ? cfg.POSITION_MARGIN : m.marginPerPosition, 2)} <span class="mute small">(${cfg.LEV_OTHER}x =${((cfg.POSITION_MARGIN > 0 ? cfg.POSITION_MARGIN : m.marginPerPosition) * cfg.LEV_OTHER).toFixed(0)}, ${cfg.LEV_FOLLOW}x =${((cfg.POSITION_MARGIN > 0 ? cfg.POSITION_MARGIN : m.marginPerPosition) * cfg.LEV_FOLLOW).toFixed(0)} USDT size)</span></div>
 <div><div class="mute">Free cash</div>${usdtPlain(m.cash, 4)}</div>
 <div><div class="mute">Margin in use (${m.openPositions.length} open)</div>${usdtPlain(m.marginInUse, 2)}</div>
 <div><div class="mute">Drawdown from peak</div>${usdtPlain(m.drawdownUsdt, 4)}</div></div>${sparkline(sim.curve)}</div>
