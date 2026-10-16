@@ -2,6 +2,9 @@ name = "bybit-macd-screener"
 main = "src/index.js"
 compatibility_date = "2025-01-01"
 
+[placement]
+region = "aws:ap-southeast-1"
+
 # Runs every 2 minutes
 [triggers]
 crons = ["*/2 * * * *"]
