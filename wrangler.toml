@@ -15,7 +15,7 @@ UNIVERSE_MODE = "auto"
 SYMBOLS = ""
 
 MODE = "sim"
-GRANULARITY = "300"       # 5m candles
+GRANULARITY = "900"       # 15m candles
 SCREEN_BATCH = "35"       # coins scanned per run
 SIM_CHECK_BATCH = "10"    # open positions re-checked per run
 MAX_SYMBOLS = "60"        # coins watched
