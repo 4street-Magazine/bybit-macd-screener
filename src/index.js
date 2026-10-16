@@ -1,21 +1,14 @@
 /**
- * MACD SCREENER (OKX data) + optional paper-trading bot for Cloudflare Workers.
+ * MACD SCREENER (OKX data) + paper-trading sim for Cloudflare Workers.
  *
- * MODE "screen" (default): no trading. Every closed 15m candle it scans the most-traded
- *   OKX USDT spot pairs and lists those whose MACD just crossed, split into LONG (crossed up)
- *   and SHORT (crossed down). Each cross is rated VERY STRONG / STRONG / MODERATE / WEAK using
- *   ADX (trend strength), the 200-EMA, the MACD zero line, cross sharpness and RSI.
- *   Times are shown in EAT (UTC+3).
- * MODE "sim": leveraged PAPER trades opened from the screener's crosses (fake money).
- * MODE "trade": the MACD stop-and-reverse PAPER trader (fake money).
+ * MODE "screen": scanner only. MODE "sim": leveraged PAPER trades from screener crosses (fake money).
+ * MODE "trade": old MACD stop-and-reverse paper bot.
  *
- * - Cron trigger. State lives in Workers KV.
- * - Data: OKX public market endpoints, no API key needed.
- * - Signal: MACD ONLY. Signals use CLOSED bars only.
+ * SIM features: tiered leverage by market cap (CoinGecko), ATR-scaled stop, rating-scaled target,
+ * trailing stop, maker fee on TP exits, all P&L shown in USDT.
  *
- * Endpoints: GET /  (dashboard)   GET /api/status   GET /api/trades   GET /api/universe
- *            POST /api/run  POST /api/reset   (both need: Authorization: Bearer <ADMIN_TOKEN>)
- *
+ * Endpoints: GET /  GET /api/status  GET /api/trades  GET /api/universe  GET /api/screen
+ *            POST /api/run  POST /api/reset   (Authorization: Bearer <ADMIN_TOKEN>)
  * Educational only. Not financial advice.
  */
 
@@ -23,9 +16,9 @@
 const OKX_HOST = "https://www.okx.com";
 
 const DEFAULTS = {
-  GRANULARITY: 900,           // bar size in seconds: 900 (15m), 3600, 14400, 86400
-  MODE: "screen",             // "screen" = screener only, "sim" = leveraged paper trades from screener signals, "trade" = old MACD paper bot
-  SCREEN_BATCH: 40,           // coins scanned per run (free plan: max 50 subrequests per run)
+  GRANULARITY: 300,           // seconds: 300 (5m), 900 (15m), 3600, 14400, 86400
+  MODE: "sim",                // "screen" | "sim" | "trade"
+  SCREEN_BATCH: 35,           // coins scanned per run (free plan: max 50 subrequests per run)
   START_CASH: 10000,
   FEE: 0.001,
   SLIPPAGE: 0.0015,
@@ -35,33 +28,37 @@ const DEFAULTS = {
 
   POSITION_PCT: 0.10,
   MAX_EXPOSURE: 0.80,
-  MAX_POSITIONS: 8,
+  MAX_POSITIONS: 22,
   SAFETY_STOP_PCT: 0.15,
   DAILY_LOSS_LIMIT: 0.04,
   MAX_DRAWDOWN: 0.20,
   HALT_DAYS: 5,
 
-  MAX_SYMBOLS: 60,            // coins watched (top by 24h volume)
-  MIN_QUOTE_VOLUME: 1000000,  // skip coins trading under $1M/day
+  MAX_SYMBOLS: 60,
+  MIN_QUOTE_VOLUME: 1000000,
   UNIVERSE_REFRESH_H: 6,
   KLINE_LIMIT: 300,
 
-  // --- MODE "sim": leveraged paper trades driven by the screener ---
-  LEVERAGE: 8,
-  SIM_MARGIN: 1,              // starting margin per position (USDT); notional = margin x leverage
-  TP_MARGIN_PCT: 0.16,        // take profit = 16% of margin  (= 2% price move at 8x)
-  SL_MARGIN_PCT: 0.053,       // stop loss   = 5.3% of margin (= 0.66% price move at 8x)
-  MIN_SCORE: 0,               // minimum screener rating (0-8) to enter. 0 = trade EVERY cross, 5 = STRONG only, 7 = VERY STRONG only
-  TRAIL: 1,                   // 1 = trailing stop on, 0 = fixed stop only
-  TRAIL_START_PCT: 0.08,      // trailing begins once the trade has been 8% of margin in profit (1% price move)
-  TRAIL_DIST_PCT: 0.06,       // then the stop follows 6% of margin (0.75% price) behind the best price, never loosening
-  SIM_FEE: 0.0005,            // per side, on notional (OKX taker is about 0.05%)
+  // --- MODE "sim" ---
+  LEV_LOW: 10,                // leverage for coins under CAP_THRESHOLD (or unknown cap)
+  LEV_HIGH: 20,               // leverage for coins at/above CAP_THRESHOLD
+  CAP_THRESHOLD: 100000000,   // $100M market cap
+  SIM_MARGIN: 2.72,           // starting margin per position (USDT). Start funds = SIM_MARGIN x MAX_POSITIONS
+  MIN_SCORE: 0,               // minimum rating (0-8) to enter. 5 = STRONG only
+  SL_ATR: 1.5,                // stop distance = 1.5 x ATR
+  MIN_SL_PCT: 0.0035,         // stop never tighter than 0.35% price move
+  MAX_SL_MARGIN: 0.30,        // stop never risks more than 30% of margin
+  RR_MIN: 1.5,                // reward:risk for a rating-0 cross
+  RR_MAX: 3,                  // reward:risk for a rating-8 cross
+  TRAIL: 1,                   // 1 = trailing stop on (starts at half the TP distance, follows 1 stop distance behind)
+  SIM_FEE: 0.0005,            // taker fee per side, on notional
+  SIM_FEE_MAKER: 0.0002,      // maker fee, used for take-profit exits
   SIM_SLIP: 0.0003,           // slippage per fill
-  SIM_CHECK_BATCH: 25,        // max open positions whose candles are re-fetched per run
+  SIM_CHECK_BATCH: 10,        // open positions whose candles are re-fetched per run
 };
 
 const STABLES = new Set(["USDC", "FDUSD", "TUSD", "USDP", "DAI", "USDT", "EUR", "AEUR", "XUSD", "USD1", "PYUSD"]);
-const INTERVALS = { 900: "15m", 3600: "1H", 14400: "4H", 86400: "1D" };   // OKX bar codes
+const INTERVALS = { 300: "5m", 900: "15m", 3600: "1H", 14400: "4H", 86400: "1D" };
 
 function getCfg(env) {
   const c = { ...DEFAULTS };
@@ -97,7 +94,6 @@ function macd(c, fast, slow, sig) {
   return { line, signal, hist };
 }
 
-/** RSI (Wilder smoothing). Returns the latest value, or null if not enough data. */
 function rsi14(c, n = 14) {
   if (c.length <= n) return null;
   let g = 0, l = 0;
@@ -111,7 +107,6 @@ function rsi14(c, n = 14) {
   return l === 0 ? 100 : 100 - 100 / (1 + g / l);
 }
 
-/** ADX with +DI / -DI (Wilder smoothing). Returns the latest values, or null if not enough data. */
 function adx14(h, l, c, n = 14) {
   const len = c.length;
   if (len < 2 * n + 2) return null;
@@ -139,7 +134,17 @@ function adx14(h, l, c, n = 14) {
   return { adx: a, pdi: lastD.pdi, mdi: lastD.mdi };
 }
 
-/** candles: [[t(sec), low, high, open, close, volume], ...] oldest first */
+/** ATR as a fraction of the latest close (Wilder smoothing). */
+function atrPct(h, l, c, n = 14) {
+  if (c.length <= n + 1) return null;
+  const tr = (i) => Math.max(h[i] - l[i], Math.abs(h[i] - c[i - 1]), Math.abs(l[i] - c[i - 1]));
+  let a = 0;
+  for (let i = 1; i <= n; i++) a += tr(i);
+  a /= n;
+  for (let i = n + 1; i < c.length; i++) a = (a * (n - 1) + tr(i)) / n;
+  return a / c[c.length - 1];
+}
+
 function compute(candles, cfg) {
   const m = macd(candles.map((x) => x[4]), cfg.MACD_FAST, cfg.MACD_SLOW, cfg.MACD_SIGNAL);
   return {
@@ -149,7 +154,6 @@ function compute(candles, cfg) {
 }
 
 // ============================== SIGNAL ==============================
-/** +1 = MACD crossed above signal (go long), -1 = crossed below (go short), 0 = no cross on this bar. */
 function macdCross(ind, i) {
   const a = ind.hist[i - 1], b = ind.hist[i];
   if (i < 1 || a == null || b == null) return 0;
@@ -158,16 +162,7 @@ function macdCross(ind, i) {
   return 0;
 }
 
-/**
- * Rates a cross out of 8 points:
- *   ADX >= 40: +3, >= 25: +2, >= 20: +1      (how strong is the trend)
- *   +DI/-DI agree with the cross direction: +1
- *   price on the right side of the 200-EMA: +2
- *   MACD line on the right side of zero at the cross: +1
- *   cross much sharper than recent candles: +1
- *   RSI stretched against the cross (LONG > 75, SHORT < 25): -1
- * 7-8 VERY STRONG, 5-6 STRONG, 3-4 MODERATE, 0-2 WEAK.
- */
+/** Rates a cross out of 8 (ADX, DI agreement, 200-EMA side, zero-line side, cross sharpness, RSI stretch). */
 function rate(side, ind, last, ci) {
   const c = ind.c;
   const a = adx14(ind.h, ind.l, c);
@@ -203,7 +198,7 @@ function rate(side, ind, last, ci) {
   return { score, label, trend, adx: a ? a.adx : null, rsi: r, emaOk, zeroOk, ratio };
 }
 
-// ============================== ENGINE ==============================
+// ============================== ENGINE (MODE "trade") ==============================
 function newState(cfg) {
   return {
     cash: cfg.START_CASH, pos: {}, pending: {}, peak: cfg.START_CASH, day: null,
@@ -211,7 +206,7 @@ function newState(cfg) {
     closed: [], events: [], curve: [], mark: {}, equity: cfg.START_CASH,
     stats: { n: 0, wins: 0, gw: 0, gl: 0, sumPct: 0, longN: 0, longPnl: 0, shortN: 0, shortPnl: 0 },
     universe: [], universeAt: 0, universeSource: "", universeNote: "", zone: {},
-    screen: {}, screenBar: {},
+    screen: {}, screenBar: {}, caps: null, capsAt: 0,
     startedAt: nowSec(), lastTick: 0, lastError: null,
   };
 }
@@ -321,8 +316,7 @@ class Engine {
   }
 }
 
-// ============================== DATA (OKX) ==========================
-// Internally coins are named like "BTCUSDT"; OKX calls them "BTC-USDT".
+// ============================== DATA (OKX + CoinGecko) ==========================
 const toInst = (sym) => sym.replace(/USDT$/, "-USDT");
 
 async function okx(path, params) {
@@ -333,7 +327,6 @@ async function okx(path, params) {
   return j.data;
 }
 
-/** One call returns the live price and 24h USDT turnover of every spot pair. */
 async function fetchTickers(cfg) {
   const list = await okx("/api/v5/market/tickers", { instType: "SPOT" });
   const prices = {}, volumes = {};
@@ -341,7 +334,7 @@ async function fetchTickers(cfg) {
     if (!t.instId.endsWith("-USDT")) continue;
     const sym = t.instId.replace("-", "");
     prices[sym] = Number(t.last);
-    volumes[sym] = Number(t.volCcy24h);     // 24h volume in quote currency (USDT)
+    volumes[sym] = Number(t.volCcy24h);
   }
   return { prices, volumes };
 }
@@ -350,11 +343,30 @@ async function fetchKlines(cfg, sym, now) {
   const bar = INTERVALS[cfg.GRANULARITY];
   if (!bar) throw new Error("Unsupported GRANULARITY");
   const list = await okx("/api/v5/market/candles", { instId: toInst(sym), bar, limit: String(Math.min(300, cfg.KLINE_LIMIT)) });
-  return list                                                                  // newest first: [ts ms, open, high, low, close, vol, ...]
-    .map((k) => [Math.floor(+k[0] / 1000), +k[3], +k[2], +k[1], +k[4], +k[5]]) // -> [t, low, high, open, close, vol]
+  return list
+    .map((k) => [Math.floor(+k[0] / 1000), +k[3], +k[2], +k[1], +k[4], +k[5]])
     .sort((a, b) => a[0] - b[0])
-    .filter((c) => c[0] + cfg.GRANULARITY <= now);                             // closed bars only
+    .filter((c) => c[0] + cfg.GRANULARITY <= now);
 }
+
+/** Market caps (USD) from CoinGecko, top 750 coins. 3 subrequests, called only when the universe refreshes. */
+async function fetchCaps() {
+  const caps = {};
+  for (let page = 1; page <= 3; page++) {
+    const r = await fetch(`https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=250&page=${page}`, { headers: { Accept: "application/json" } });
+    if (!r.ok) throw new Error(`CoinGecko HTTP ${r.status}`);
+    for (const c of await r.json()) {
+      const sym = c.symbol.toUpperCase() + "USDT";
+      if (c.market_cap && !(sym in caps)) caps[sym] = c.market_cap;   // largest wins on duplicate tickers
+    }
+  }
+  return caps;
+}
+
+const levFor = (cfg, s, sym) => {
+  const cap = s.caps && s.caps[sym];
+  return cap && cap >= cfg.CAP_THRESHOLD ? cfg.LEV_HIGH : cfg.LEV_LOW;   // unknown cap = low leverage
+};
 
 async function discoverPairs() {
   const list = await okx("/api/v5/public/instruments", { instType: "SPOT" });
@@ -387,7 +399,6 @@ async function refreshUniverse(env, cfg, s, now, volumes) {
   s.universeNote = (note ? note + ". " : "") + `${found} candidates, ${list.length} pass liquidity filter`;
 }
 
-// Runs fn over items one at a time with a pause, to stay under OKX's rate limit.
 async function mapLimit(items, limit, fn) {
   for (const item of items) {
     await fn(item);
@@ -416,7 +427,8 @@ async function screenScan(cfg, s, volumes, now, lastClosedOpen) {
       if (!side) continue;
       const rt = rate(side, ind, last, last - k);
       s.screen[sym] = { side, age: k + 1, crossT: ind.t[last - k], barT: ind.t[last], price: ind.c[last],
-        hist: ind.hist[last], strength: Math.abs(ind.hist[last - k]) / ind.c[last - k], vol: volumes[sym] ?? 0, ...rt };
+        hist: ind.hist[last], strength: Math.abs(ind.hist[last - k]) / ind.c[last - k], vol: volumes[sym] ?? 0,
+        atr: atrPct(ind.h, ind.l, ind.c), ...rt };
       break;
     }
   }
@@ -439,13 +451,13 @@ function screenData(s, cfg, age, now = nowSec()) {
 }
 
 // ========================= LEVERAGED SIM (MODE "sim") =========================
-// Every screener cross on the last closed candle that rates >= MIN_SCORE opens a position at the live
-// price. Exits are TP / SL only. When a trade wins, its net profit is split evenly across all
+// Stop = SL_ATR x ATR (clamped). Target = stop x reward:risk, where reward:risk scales from RR_MIN
+// (rating 0) to RR_MAX (rating 8). When a trade wins, its net profit is split evenly across all
 // MAX_POSITIONS slots, so every future position's margin grows by profit / MAX_POSITIONS.
 function newSim(cfg) {
   const start = cfg.SIM_MARGIN * cfg.MAX_POSITIONS;
   return { start, cash: start, base: cfg.SIM_MARGIN, pos: {}, closed: [], events: [], curve: [], mark: {},
-    lastCross: {}, stats: { n: 0, wins: 0, gw: 0, gl: 0 }, peak: start, startedAt: nowSec() };
+    lastCross: {}, stats: { n: 0, wins: 0, gw: 0, gl: 0, pnl: 0 }, peak: start, startedAt: nowSec() };
 }
 
 function simEquity(sim) {
@@ -455,22 +467,40 @@ function simEquity(sim) {
   }, sim.cash);
 }
 
+/** Real (net) unrealized P&L in USDT: price move minus the entry fee already paid and the estimated exit fee. */
+function posPnl(cfg, p, px) {
+  if (!px) return 0;
+  return p.side * (px - p.entry) * p.qty - p.fee - p.qty * px * cfg.SIM_FEE;
+}
+
 function simEvent(sim, kind, sym, t, info) {
   sim.events.unshift({ kind, sym, t, info });
   if (sim.events.length > 40) sim.events.length = 40;
 }
 
-function simOpen(cfg, sim, sym, side, price, t, rt) {
+function simOpen(cfg, sim, sym, side, price, t, rt, lev) {
   if (sim.pos[sym] || Object.keys(sim.pos).length >= cfg.MAX_POSITIONS) return false;
   const fill = price * (1 + side * cfg.SIM_SLIP);
-  const margin = Math.min(sim.base, sim.cash / (1 + cfg.LEVERAGE * cfg.SIM_FEE));
+  const margin = Math.min(sim.base, sim.cash / (1 + lev * cfg.SIM_FEE));
   if (margin < 0.05) return false;
-  const notional = margin * cfg.LEVERAGE, qty = notional / fill, fee = notional * cfg.SIM_FEE;
+  const notional = margin * lev, qty = notional / fill, fee = notional * cfg.SIM_FEE;
   sim.cash -= margin + fee;
-  sim.pos[sym] = { side, qty, entry: fill, best: fill, margin, fee, t, chk: Math.floor(t / cfg.GRANULARITY) * cfg.GRANULARITY, label: rt.label, score: rt.score, adx: rt.adx, rsi: rt.rsi,
-    tp: fill * (1 + (side * cfg.TP_MARGIN_PCT) / cfg.LEVERAGE), sl: fill * (1 - (side * cfg.SL_MARGIN_PCT) / cfg.LEVERAGE) };
+
+  const atr = rt.atr ?? 0.004;
+  const slMove = Math.min(Math.max(atr * cfg.SL_ATR, cfg.MIN_SL_PCT), cfg.MAX_SL_MARGIN / lev);
+  const rr = cfg.RR_MIN + (cfg.RR_MAX - cfg.RR_MIN) * Math.min(rt.score ?? 0, 8) / 8;
+  const tpMove = slMove * rr;
+
+  sim.pos[sym] = {
+    side, qty, entry: fill, best: fill, margin, fee, t, lev,
+    chk: Math.floor(t / cfg.GRANULARITY) * cfg.GRANULARITY,
+    label: rt.label, score: rt.score, adx: rt.adx, rsi: rt.rsi,
+    tp: fill * (1 + side * tpMove), sl: fill * (1 - side * slMove),
+    ts: tpMove * 0.5, td: slMove, rr,
+  };
   sim.mark[sym] = price;
-  simEvent(sim, "OPEN " + SIDE(side), sym, t, `${rt.label} ${rt.score}/8, margin $${margin.toFixed(3)}, ${cfg.LEVERAGE}x`);
+  simEvent(sim, "OPEN " + SIDE(side), sym, t,
+    `${rt.label} ${rt.score}/8, ${lev}x, margin ${margin.toFixed(3)} USDT, size ${notional.toFixed(2)} USDT, SL ${(slMove * 100).toFixed(2)}% TP ${(tpMove * 100).toFixed(2)}% (${rr.toFixed(1)}R)`);
   return true;
 }
 
@@ -479,28 +509,28 @@ function simClose(cfg, sim, sym, fill, t, reason) {
   delete sim.pos[sym];
   delete sim.mark[sym];
   const gross = p.side * (fill - p.entry) * p.qty;
-  const exitFee = p.qty * fill * cfg.SIM_FEE;
+  const rate = reason.startsWith("take profit") ? cfg.SIM_FEE_MAKER : cfg.SIM_FEE;
+  const exitFee = p.qty * fill * rate;
   sim.cash += Math.max(0, p.margin + gross - exitFee);
-  const pnl = gross - exitFee - p.fee, pct = pnl / p.margin;
-  sim.closed.push({ sym, side: p.side, tIn: p.t, tOut: t, entry: p.entry, exit: fill, margin: p.margin, pnl, pct, reason, label: p.label, score: p.score });
+  const pnl = gross - exitFee - p.fee;
+  sim.closed.push({ sym, side: p.side, tIn: p.t, tOut: t, entry: p.entry, exit: fill, margin: p.margin, lev: p.lev, pnl, reason, label: p.label, score: p.score });
   if (sim.closed.length > 300) sim.closed.shift();
   const st = sim.stats;
   st.n++;
+  st.pnl = (st.pnl || 0) + pnl;
   if (pnl > 0) { st.wins++; st.gw += pnl; sim.base += pnl / cfg.MAX_POSITIONS; } else st.gl += -pnl;
-  simEvent(sim, "CLOSE " + SIDE(p.side), sym, t, `${reason}, P&L ${pnl >= 0 ? "+" : ""}${pnl.toFixed(4)} (${(pct * 100).toFixed(1)}% of margin)`);
+  simEvent(sim, "CLOSE " + SIDE(p.side), sym, t, `${reason}, P&L ${pnl >= 0 ? "+" : ""}${pnl.toFixed(4)} USDT`);
 }
 
-/** Trailing stop: after a bar that did not exit, pull the stop up (long) / down (short) behind the best price. */
+/** Trailing stop in price terms: starts at half the TP distance, then follows one stop distance behind the best price. */
 function simTrail(cfg, p, h, l) {
-  if (!cfg.TRAIL) return;
+  if (!cfg.TRAIL || !p.td) return;
   if (p.side > 0) p.best = Math.max(p.best, h); else p.best = Math.min(p.best, l);
-  const peak = p.side * (p.best / p.entry - 1) * cfg.LEVERAGE;        // best profit so far, as a fraction of margin
-  if (peak < cfg.TRAIL_START_PCT) return;                               // not in enough profit yet: keep the fixed stop
-  const sl = p.best * (1 - (p.side * cfg.TRAIL_DIST_PCT) / cfg.LEVERAGE);
+  if (p.side * (p.best / p.entry - 1) < p.ts) return;
+  const sl = p.best * (1 - p.side * p.td);
   if (p.side > 0 ? sl > p.sl : sl < p.sl) p.sl = sl;
 }
 
-/** Did this bar (or live price, with o=h=l) hit the stop or target? Stop wins if both hit. */
 function simExit(cfg, p, o, h, l) {
   const s = p.side;
   if (s > 0 ? l <= p.sl : h >= p.sl) return { px: (s > 0 ? Math.min(o, p.sl) : Math.max(o, p.sl)) * (1 - s * cfg.SIM_SLIP), reason: "stop loss" };
@@ -513,9 +543,6 @@ async function simStep(cfg, s, prices, now) {
   const latest = Math.floor(now / gran) * gran - gran;
 
   // 1) exits: replay closed candles after the entry candle, then check the live price
-  // Only positions with a newly closed candle need their candles re-fetched, oldest-checked first and
-  // capped per run so 60 open positions can't blow the 50-subrequest limit. The live-price check below
-  // still covers every position on every run.
   const syms = Object.keys(sim.pos)
     .filter((k) => (sim.pos[k].chk || 0) < latest)
     .sort((a, b) => (sim.pos[a].chk || 0) - (sim.pos[b].chk || 0))
@@ -529,7 +556,7 @@ async function simStep(cfg, s, prices, now) {
     const entryBar = Math.floor(p.t / gran) * gran;
     for (const k of klines[sym] || []) {
       if (!p || k[0] <= entryBar) continue;
-      const x = simExit(cfg, p, k[3], k[2], k[1]);   // candle = [t, low, high, open, close, vol]
+      const x = simExit(cfg, p, k[3], k[2], k[1]);
       if (x) { simClose(cfg, sim, sym, x.px, k[0] + gran, x.reason); p = null; }
       else simTrail(cfg, p, k[2], k[1]);
     }
@@ -553,7 +580,7 @@ async function simStep(cfg, s, prices, now) {
   }
   cands.sort((a, b) => b.r.score - a.r.score || b.r.vol - a.r.vol);
   for (const { sym, r } of cands) {
-    if (simOpen(cfg, sim, sym, r.side, prices[sym], now, r)) sim.lastCross[sym] = r.crossT;
+    if (simOpen(cfg, sim, sym, r.side, prices[sym], now, r, levFor(cfg, s, sym))) sim.lastCross[sym] = r.crossT;
   }
   for (const k of Object.keys(sim.lastCross)) if (sim.lastCross[k] < now - 86400) delete sim.lastCross[k];
 
@@ -565,16 +592,20 @@ async function simStep(cfg, s, prices, now) {
 
 function simSummary(s, cfg) {
   const sim = s.sim || newSim(cfg), st = sim.stats, eq = simEquity(sim);
+  const open = Object.entries(sim.pos).map(([sym, p]) => {
+    const px = sim.mark[sym];
+    return { sym, side: SIDE(p.side), lev: p.lev || cfg.LEV_LOW, entry: p.entry, price: px, tp: p.tp, sl: p.sl,
+      margin: p.margin, size: p.margin * (p.lev || cfg.LEV_LOW), rating: `${p.label} ${p.score}/8`, pnlUsdt: posPnl(cfg, p, px) };
+  });
+  const unrealized = open.reduce((a, p) => a + p.pnlUsdt, 0);
+  const realized = st.pnl || 0;
   return {
-    mode: "sim", leverage: cfg.LEVERAGE, minScore: cfg.MIN_SCORE,
-    equity: eq, start: sim.start, returnPct: (eq / sim.start - 1) * 100, cash: sim.cash,
-    marginPerPosition: sim.base, drawdownPct: (1 - eq / sim.peak) * 100,
-    openPositions: Object.entries(sim.pos).map(([sym, p]) => {
-      const px = sim.mark[sym];
-      return { sym, side: SIDE(p.side), entry: p.entry, price: px, tp: p.tp, sl: p.sl, margin: p.margin, rating: `${p.label} ${p.score}/8`,
-        pnlPctOfMargin: px ? p.side * (px / p.entry - 1) * cfg.LEVERAGE * 100 : null };
-    }),
-    trades: { count: st.n, winRate: st.n ? st.wins / st.n : null, profitFactor: st.gl > 0 ? st.gw / st.gl : null },
+    mode: "sim", minScore: cfg.MIN_SCORE,
+    equity: eq, start: sim.start, cash: sim.cash,
+    totalPnlUsdt: realized + unrealized, realizedPnlUsdt: realized, unrealizedPnlUsdt: unrealized,
+    marginPerPosition: sim.base, drawdownUsdt: sim.peak - eq,
+    openPositions: open,
+    trades: { count: st.n, wins: st.wins, winRate: st.n ? st.wins / st.n : null, profitFactor: st.gl > 0 ? st.gw / st.gl : null },
     lastTick: s.lastTick, lastError: s.lastError,
   };
 }
@@ -603,6 +634,14 @@ async function tick(env) {
 
   if (cfg.MODE === "sim") {
     if (!s.sim) s.sim = newSim(cfg);
+    // market caps for the leverage tiers (refreshed together with the universe, 3 subrequests)
+    if (s.universe.length && (!s.caps || (s.capsAt || 0) < s.universeAt)) {
+      try {
+        const all = await fetchCaps();
+        s.caps = Object.fromEntries(s.universe.filter((x) => all[x]).map((x) => [x, all[x]]));
+        s.capsAt = now;
+      } catch (e) { s.lastError = "caps: " + e.message; }
+    }
     await screenScan(cfg, s, volumes, now, lastClosedOpen);
     await simStep(cfg, s, prices, now);
     await env.BOT_KV.put("state", JSON.stringify(s));
@@ -683,6 +722,9 @@ const money = (n) => (n < 0 ? "-" : "") + "$" + Math.abs(n).toLocaleString("en-U
 const num = (n) => (n >= 100 ? n.toFixed(2) : n.toPrecision(5));
 const ago = (t) => { if (!t) return "never"; const m = Math.round((nowSec() - t) / 60); return m < 1 ? "just now" : m < 120 ? m + " min ago" : Math.round(m / 60) + " h ago"; };
 const clr = (n) => (n > 0 ? "up" : n < 0 ? "down" : "");
+/** Signed USDT amount, e.g. +0.1234 USDT */
+const usdt = (n, d = 4) => (n > 0 ? "+" : n < 0 ? "-" : "") + Math.abs(n).toFixed(d) + " USDT";
+const usdtPlain = (n, d = 2) => n.toFixed(d) + " USDT";
 
 function sparkline(curve) {
   if (curve.length < 2) return "";
@@ -697,7 +739,7 @@ const STYLE = `
 body{margin:0;padding:16px;background:var(--bg);color:var(--text);font:15px/1.45 system-ui,sans-serif}
 .wrap{max-width:760px;margin:auto}h1{font-size:18px;margin:0 0 2px}.mute{color:var(--mute)}.up{color:var(--up)}.down{color:var(--down)}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin:12px 0}
-.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}.big{font-size:26px;font-weight:650}
+.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}.big{font-size:24px;font-weight:650}
 table{width:100%;border-collapse:collapse;font-size:14px}th{text-align:left;color:var(--mute);font-weight:500}td,th{padding:6px 4px;border-top:1px solid var(--line);vertical-align:top}
 .scroll{overflow-x:auto}.spark{width:100%;height:60px;color:var(--text)}ul{padding-left:18px;margin:6px 0}h2{font-size:14px;margin:0 0 8px;color:var(--mute);font-weight:600}
 .warn{color:var(--down)} .tag{font-size:10px;padding:1px 5px;border-radius:6px;border:1px solid var(--line);color:var(--mute);margin-left:4px}
@@ -706,8 +748,7 @@ table{width:100%;border-collapse:collapse;font-size:14px}th{text-align:left;colo
 .lv3{font-weight:800}.lv2{font-weight:700}.lv1{font-weight:600}.lv0{font-weight:500;color:var(--mute)}.small{font-size:12px}`;
 
 const usd = (n) => (n >= 1e6 ? "$" + (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? "$" + Math.round(n / 1e3) + "K" : "$" + Math.round(n));
-// Times are shown in EAT (UTC+3)
-const hhmm = (t) => new Date((t + 3 * 3600) * 1000).toISOString().slice(11, 16);
+const hhmm = (t) => new Date((t + 3 * 3600) * 1000).toISOString().slice(11, 16);   // EAT (UTC+3)
 
 function ratingCell(r) {
   if (!r.label) return `<span class="mute">updating...</span>`;
@@ -717,7 +758,6 @@ function ratingCell(r) {
     200-EMA ${r.emaOk ? "✓" : "✗"} · zero-line ${r.zeroOk ? "✓" : "✗"}</span>`;
 }
 
-/** The LONG / SHORT cross tables, shared by the screener page and the sim page. */
 function screenTables(d, cfg) {
   const ageTxt = (r) => (r.age === 1 ? "last candle" : `${r.age} candles ago`);
   const tbl = (rows, cls) => `<div class="scroll"><table><tr><th>Coin</th><th>Crossed</th><th>Rating</th><th>Price</th><th>24h vol</th></tr>${
@@ -741,38 +781,40 @@ function screenPage(s, cfg, age) {
 ${d.lastError ? `<div class="warn">Last error: ${esc(d.lastError)}</div>` : ""}
 <div class="card tabs">${tabs}<div class="mute" style="margin-top:8px;font-size:13px">Shows coins whose MACD (${cfg.MACD_FAST}/${cfg.MACD_SLOW}/${cfg.MACD_SIGNAL}) crossed its signal line within this many closed candles. Times in EAT. Best-rated first.</div></div>
 ${screenTables(d, cfg)}
-<div class="card small mute"><b>How to read the rating (out of 8).</b> ADX measures how strong the trend is: under 20 choppy, 25+ trending, 40+ strong, 50+ very strong. Points are added when the trend direction agrees with the cross, price is on the right side of the 200-EMA, the MACD line is on the right side of zero, and the cross is sharper than recent candles. A point is removed if RSI is already stretched (LONG above 75, SHORT below 25). VERY STRONG = 7-8, STRONG = 5-6, MODERATE = 3-4, WEAK = 0-2. ✓ means the check passed. This is a guide to trend quality on this timeframe, not a prediction.</div>
+<div class="card small mute"><b>How to read the rating (out of 8).</b> ADX measures trend strength: under 20 choppy, 25+ trending, 40+ strong, 50+ very strong. Points are added when the trend direction agrees with the cross, price is on the right side of the 200-EMA, the MACD line is on the right side of zero, and the cross is sharper than recent candles. A point is removed if RSI is already stretched. VERY STRONG = 7-8, STRONG = 5-6, MODERATE = 3-4, WEAK = 0-2.</div>
 <div class="mute" style="font-size:12px">${esc(d.note)}. Screener only: no trades are placed. Educational, not financial advice.</div></div></body></html>`;
 }
 
 function simPage(s, cfg, tab = "sim", age = 1) {
   const sim = s.sim || newSim(cfg), m = simSummary(s, cfg), scr = screenData(s, cfg, age);
-  const f = (n, d = 4) => (n < 0 ? "-" : "") + "$" + Math.abs(n).toFixed(d);
-  const rows = m.openPositions.map((p) => `<tr><td><b>${esc(p.sym.replace("USDT", ""))}</b></td><td class="${p.side === "LONG" ? "up" : "down"}">${p.side}</td>
+  const rows = m.openPositions.map((p) => `<tr><td><b>${esc(p.sym.replace("USDT", ""))}</b><br><span class="mute small">${p.lev}x</span></td><td class="${p.side === "LONG" ? "up" : "down"}">${p.side}</td>
     <td>${num(p.entry)}<br><span class="mute small">TP ${num(p.tp)} · SL ${num(p.sl)}</span></td><td>${p.price ? num(p.price) : "-"}</td>
-    <td class="${clr(p.pnlPctOfMargin)}">${p.pnlPctOfMargin == null ? "-" : p.pnlPctOfMargin.toFixed(1) + "%"}</td><td class="mute small">${esc(p.rating)}</td></tr>`).join("")
+    <td class="${clr(p.pnlUsdt)}">${usdt(p.pnlUsdt)}<br><span class="mute small">size ${p.size.toFixed(2)}</span></td><td class="mute small">${esc(p.rating)}</td></tr>`).join("")
     || `<tr><td colspan="6" class="mute">No open positions</td></tr>`;
-  const trades = sim.closed.slice(-15).reverse().map((t) => `<tr><td>${esc(t.sym.replace("USDT", ""))}</td><td>${t.side > 0 ? "LONG" : "SHORT"}</td>
-    <td class="${clr(t.pnl)}">${f(t.pnl)}<br><span class="mute small">${(t.pct * 100).toFixed(1)}% of margin</span></td><td class="mute small">${esc(t.reason)}<br>${esc(t.label)} ${t.score}/8 · ${hhmm(t.tOut)} EAT</td></tr>`).join("")
+  const trades = sim.closed.slice(-15).reverse().map((t) => `<tr><td>${esc(t.sym.replace("USDT", ""))}<br><span class="mute small">${t.lev || ""}${t.lev ? "x" : ""}</span></td><td>${t.side > 0 ? "LONG" : "SHORT"}</td>
+    <td class="${clr(t.pnl)}">${usdt(t.pnl)}</td><td class="mute small">${esc(t.reason)}<br>${esc(t.label)} ${t.score}/8 · ${hhmm(t.tOut)} EAT</td></tr>`).join("")
     || `<tr><td colspan="4" class="mute">No closed trades yet</td></tr>`;
   const events = sim.events.slice(0, 10).map((e) => `<li><b>${esc(e.kind)}</b> ${esc(e.sym.replace("USDT", ""))} <span class="mute">${esc(e.info)}</span></li>`).join("");
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="60">
 <title>MACD Leverage Sim</title><style>${STYLE}</style></head><body><div class="wrap">
-<h1>MACD Screener Sim · ${cfg.LEVERAGE}x paper trades</h1>
-<div class="mute">Fake money · ${cfg.MIN_SCORE > 0 ? `enters ${cfg.MIN_SCORE}+/8 crosses` : "trades every coin whose MACD crossed on the last candle"} · TP ${(cfg.TP_MARGIN_PCT * 100).toFixed(1)}% / SL ${(cfg.SL_MARGIN_PCT * 100).toFixed(1)}% of margin${cfg.TRAIL ? `, then trails ${(cfg.TRAIL_DIST_PCT * 100).toFixed(0)}% behind after +${(cfg.TRAIL_START_PCT * 100).toFixed(0)}%` : ""} · updated ${ago(s.lastTick)}</div>
+<h1>MACD Screener Sim · ${cfg.LEV_LOW}x / ${cfg.LEV_HIGH}x paper trades</h1>
+<div class="mute">Fake money · ${cfg.GRANULARITY / 60}m candles · ${cfg.MIN_SCORE > 0 ? `enters ${cfg.MIN_SCORE}+/8 crosses` : "trades every cross on the last candle"} · ${cfg.LEV_HIGH}x if market cap ≥ ${usd(cfg.CAP_THRESHOLD)}, else ${cfg.LEV_LOW}x · stop ${cfg.SL_ATR}×ATR, target ${cfg.RR_MIN}-${cfg.RR_MAX}R by rating${cfg.TRAIL ? ", trailing" : ""} · updated ${ago(s.lastTick)}</div>
 ${m.lastError ? `<div class="warn">Last error: ${esc(m.lastError)}</div>` : ""}
 <div class="card tabs"><a href="?tab=sim" class="${tab === "sim" ? "on" : ""}">Sim trades (${m.openPositions.length} open)</a><a href="?tab=coins" class="${tab === "coins" ? "on" : ""}">Coins (${scr.long.length + scr.short.length} crossed)</a></div>
 ${tab === "coins" ? `<div class="card tabs"><div class="mute small" style="margin-bottom:8px">Scanned ${scr.scanned}/${scr.total} coins for the ${hhmm(scr.latestCandleOpen + cfg.GRANULARITY)} EAT candle close. Coins that crossed on the last closed candle get a trade; the others are shown for reference.</div>${[1, 2, 3].map((n) => `<a href="?tab=coins&age=${n}" class="${n === age ? "on" : ""}">${n === 1 ? "Last candle" : "≤ " + n + " candles"}</a>`).join("")}</div>
-${screenTables(scr, cfg)}` : `<div class="card"><div class="grid"><div><div class="mute">Equity (started ${f(m.start, 2)})</div><div class="big">${f(m.equity)}</div></div>
-<div><div class="mute">Return</div><div class="big ${clr(m.returnPct)}">${m.returnPct.toFixed(2)}%</div></div>
-<div><div class="mute">Margin per new position</div>${f(m.marginPerPosition)} <span class="mute">(${f(m.marginPerPosition * cfg.LEVERAGE)} size)</span></div>
-<div><div class="mute">Drawdown</div>${m.drawdownPct.toFixed(2)}%</div></div>${sparkline(sim.curve)}</div>
-<div class="card"><h2>OPEN POSITIONS (${m.openPositions.length}/${cfg.MAX_POSITIONS})</h2><div class="scroll"><table><tr><th>Coin</th><th>Side</th><th>Entry</th><th>Now</th><th>P&amp;L</th><th>Rating</th></tr>${rows}</table></div></div>
-<div class="card"><h2>CLOSED TRADES · ${m.trades.count} total${m.trades.winRate != null ? ` · ${(m.trades.winRate * 100).toFixed(0)}% win · PF ${m.trades.profitFactor ? m.trades.profitFactor.toFixed(2) : "∞"}` : ""}</h2>
+${screenTables(scr, cfg)}` : `<div class="card"><div class="grid">
+<div><div class="mute">Total P&amp;L (real, after fees)</div><div class="big ${clr(m.totalPnlUsdt)}">${usdt(m.totalPnlUsdt, 4)}</div></div>
+<div><div class="mute">Equity (started ${usdtPlain(m.start)})</div><div class="big">${usdtPlain(m.equity, 4)}</div></div>
+<div><div class="mute">Realized (closed trades)</div><span class="${clr(m.realizedPnlUsdt)}">${usdt(m.realizedPnlUsdt)}</span></div>
+<div><div class="mute">Unrealized (open positions)</div><span class="${clr(m.unrealizedPnlUsdt)}">${usdt(m.unrealizedPnlUsdt)}</span></div>
+<div><div class="mute">Margin per new position</div>${usdtPlain(m.marginPerPosition, 4)}</div>
+<div><div class="mute">Drawdown from peak</div>${usdtPlain(m.drawdownUsdt, 4)}</div></div>${sparkline(sim.curve)}</div>
+<div class="card"><h2>OPEN POSITIONS (${m.openPositions.length}/${cfg.MAX_POSITIONS})</h2><div class="scroll"><table><tr><th>Coin</th><th>Side</th><th>Entry</th><th>Now</th><th>P&amp;L (net)</th><th>Rating</th></tr>${rows}</table></div></div>
+<div class="card"><h2>CLOSED TRADES · ${m.trades.count} total${m.trades.winRate != null ? ` · ${m.trades.wins} wins (${(m.trades.winRate * 100).toFixed(0)}%) · PF ${m.trades.profitFactor ? m.trades.profitFactor.toFixed(2) : "∞"}` : ""}</h2>
 <div class="scroll"><table><tr><th>Coin</th><th>Side</th><th>P&amp;L</th><th>Exit</th></tr>${trades}</table></div></div>
 <div class="card"><h2>RECENT EVENTS</h2><ul>${events || '<li class="mute">Nothing yet</li>'}</ul></div>`}
-<div class="mute" style="font-size:12px">Simulation only: fees ${(cfg.SIM_FEE * 100).toFixed(2)}%/side, slippage ${(cfg.SIM_SLIP * 100).toFixed(2)}%, no funding. Educational, not financial advice.</div></div></body></html>`;
+<div class="mute" style="font-size:12px">Simulation only. P&amp;L includes entry and exit fees (taker ${(cfg.SIM_FEE * 100).toFixed(2)}%, maker ${(cfg.SIM_FEE_MAKER * 100).toFixed(2)}% on take-profit) and ${(cfg.SIM_SLIP * 100).toFixed(2)}% slippage; no funding. Educational, not financial advice.</div></div></body></html>`;
 }
 
 function page(s, cfg) {
