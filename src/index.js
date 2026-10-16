@@ -45,8 +45,8 @@ const DEFAULTS = {
   FOLLOWERS: "",              // comma list of coins always treated as BTC followers, e.g. "DOGE,PEPE,SHIB"
   BTC_CORR: 0.6,              // a coin "follows BTC" when its return correlation with BTC is at least this
   CORR_BARS: 100,             // candles used for the correlation
-  POSITION_SIZE: 10,          // every position is this many USDT of size (margin = size / leverage). 0 = use SIM_MARGIN instead
-  SIM_MARGIN: 1,              // start funds = SIM_MARGIN x MAX_POSITIONS (and margin per position when POSITION_SIZE = 0)
+  POSITION_MARGIN: 1,         // every position uses this much margin (USDT); size = margin x leverage (10x = 10 USDT, 30x = 30 USDT). 0 = compounding margin
+  SIM_MARGIN: 1.1,            // start funds = SIM_MARGIN x MAX_POSITIONS (a little above POSITION_MARGIN to cover fees)
   MIN_SCORE: 0,               // minimum rating (0-8) to enter. 5 = STRONG only
   TPSL_MODE: "size",          // "size" = TP/SL as % of POSITION SIZE (price move), "atr" = volatility-scaled
   TP_SIZE_PCT: 0.16,          // size mode: take profit = 16% of position size
@@ -502,7 +502,7 @@ function simEvent(sim, kind, sym, t, info) {
 function simOpen(cfg, sim, sym, side, price, t, rt, lev) {
   if (sim.pos[sym] || Object.keys(sim.pos).length >= cfg.MAX_POSITIONS) return false;
   const fill = price * (1 + side * cfg.SIM_SLIP);
-  const want = cfg.POSITION_SIZE > 0 ? cfg.POSITION_SIZE / lev : sim.base;   // fixed size: 1 USDT margin at 10x, 0.5 at 20x
+  const want = cfg.POSITION_MARGIN > 0 ? cfg.POSITION_MARGIN : sim.base;   // fixed margin: size = margin x leverage
   const margin = Math.min(want, sim.cash / (1 + lev * cfg.SIM_FEE));
   if (margin < 0.05) return false;
   const notional = margin * lev, qty = notional / fill, fee = notional * cfg.SIM_FEE;
@@ -546,7 +546,7 @@ function simClose(cfg, sim, sym, fill, t, reason) {
   const st = sim.stats;
   st.n++;
   st.pnl = (st.pnl || 0) + pnl;
-  if (pnl > 0) { st.wins++; st.gw += pnl; if (!(cfg.POSITION_SIZE > 0)) sim.base += pnl / cfg.MAX_POSITIONS; } else st.gl += -pnl;
+  if (pnl > 0) { st.wins++; st.gw += pnl; if (!(cfg.POSITION_MARGIN > 0)) sim.base += pnl / cfg.MAX_POSITIONS; } else st.gl += -pnl;
   simEvent(sim, "CLOSE " + SIDE(p.side), sym, t, `${reason}, P&L ${pnl >= 0 ? "+" : ""}${pnl.toFixed(4)} USDT`);
 }
 
@@ -848,7 +848,7 @@ ${screenTables(scr, cfg)}` : `<div class="card"><div class="grid">
 <div><div class="mute">Equity (started ${usdtPlain(m.start)})</div><div class="big">${usdtPlain(m.equity, 4)}</div></div>
 <div><div class="mute">Realized (closed trades)</div><span class="${clr(m.realizedPnlUsdt)}">${usdt(m.realizedPnlUsdt)}</span></div>
 <div><div class="mute">Unrealized (open positions)</div><span class="${clr(m.unrealizedPnlUsdt)}">${usdt(m.unrealizedPnlUsdt)}</span></div>
-<div><div class="mute">Size per position</div>${cfg.POSITION_SIZE > 0 ? usdtPlain(cfg.POSITION_SIZE, 2) : usdtPlain(m.marginPerPosition, 4) + " margin"}</div>
+<div><div class="mute">Margin per position</div>${usdtPlain(cfg.POSITION_MARGIN > 0 ? cfg.POSITION_MARGIN : m.marginPerPosition, 2)} <span class="mute small">(${cfg.LEV_OTHER}x = ${((cfg.POSITION_MARGIN > 0 ? cfg.POSITION_MARGIN : m.marginPerPosition) * cfg.LEV_OTHER).toFixed(0)}, ${cfg.LEV_FOLLOW}x = ${((cfg.POSITION_MARGIN > 0 ? cfg.POSITION_MARGIN : m.marginPerPosition) * cfg.LEV_FOLLOW).toFixed(0)} USDT size)</span></div>
 <div><div class="mute">Drawdown from peak</div>${usdtPlain(m.drawdownUsdt, 4)}</div></div>${sparkline(sim.curve)}</div>
 <div class="card"><h2>OPEN POSITIONS (${m.openPositions.length}/${cfg.MAX_POSITIONS})</h2><div class="scroll"><table><tr><th>Coin</th><th>Side</th><th>Entry</th><th>Now</th><th>P&amp;L (net)</th><th>Rating</th></tr>${rows}</table></div></div>
 <div class="card"><h2>CLOSED TRADES · ${m.trades.count} total${m.trades.winRate != null ? ` · ${m.trades.wins} wins (${(m.trades.winRate * 100).toFixed(0)}%) · PF ${m.trades.profitFactor ? m.trades.profitFactor.toFixed(2) : "∞"}` : ""}</h2>
