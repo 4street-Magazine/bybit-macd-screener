@@ -25,6 +25,7 @@ SIM_MARGIN = "1"          # start funds = 1 x 22 = 22 USDT
 
 LEV_FOLLOW = "30"         # coins that follow BTC
 LEV_OTHER = "10"          # all other coins
+FOLLOWERS = "BTC,ETH,SOL,XRP,DOGE,ADA,AVAX,LINK,DOT,LTC,BCH,SHIB,PEPE,BONK,WIF,FLOKI,NEAR,APT,ARB,OP,SUI,INJ,ATOM,UNI,AAVE,FIL,ETC,HBAR,ICP,TIA,SEI,RENDER,FET,TON"   # always 30x
 BTC_CORR = "0.6"          # follower = return correlation with BTC of 0.6 or more
 CORR_BARS = "100"         # candles used for the correlation
 
