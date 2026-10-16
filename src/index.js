@@ -3,7 +3,9 @@
  *
  * MODE "screen" (default): no trading. Every closed 15m candle it scans the most-traded
  *   OKX USDT spot pairs and lists those whose MACD just crossed, split into LONG (crossed up)
- *   and SHORT (crossed down) on the dashboard.
+ *   and SHORT (crossed down). Each cross is rated VERY STRONG / STRONG / MODERATE / WEAK using
+ *   ADX (trend strength), the 200-EMA, the MACD zero line, cross sharpness and RSI.
+ *   Times are shown in EAT (UTC+3).
  * MODE "trade": the MACD stop-and-reverse PAPER trader (fake money).
  *
  * - Cron trigger. State lives in Workers KV.
@@ -81,12 +83,54 @@ function macd(c, fast, slow, sig) {
   return { line, signal, hist };
 }
 
+/** RSI (Wilder smoothing). Returns the latest value, or null if not enough data. */
+function rsi14(c, n = 14) {
+  if (c.length <= n) return null;
+  let g = 0, l = 0;
+  for (let i = 1; i <= n; i++) { const d = c[i] - c[i - 1]; if (d > 0) g += d; else l -= d; }
+  g /= n; l /= n;
+  for (let i = n + 1; i < c.length; i++) {
+    const d = c[i] - c[i - 1];
+    g = (g * (n - 1) + Math.max(d, 0)) / n;
+    l = (l * (n - 1) + Math.max(-d, 0)) / n;
+  }
+  return l === 0 ? 100 : 100 - 100 / (1 + g / l);
+}
+
+/** ADX with +DI / -DI (Wilder smoothing). Returns the latest values, or null if not enough data. */
+function adx14(h, l, c, n = 14) {
+  const len = c.length;
+  if (len < 2 * n + 2) return null;
+  let str = 0, spdm = 0, smdm = 0;
+  const dxs = [];
+  for (let i = 1; i < len; i++) {
+    const up = h[i] - h[i - 1], dn = l[i - 1] - l[i];
+    const pdm = up > dn && up > 0 ? up : 0;
+    const mdm = dn > up && dn > 0 ? dn : 0;
+    const tr = Math.max(h[i] - l[i], Math.abs(h[i] - c[i - 1]), Math.abs(l[i] - c[i - 1]));
+    if (i <= n) { str += tr; spdm += pdm; smdm += mdm; }
+    else { str = str - str / n + tr; spdm = spdm - spdm / n + pdm; smdm = smdm - smdm / n + mdm; }
+    if (i >= n) {
+      const pdi = str ? (100 * spdm) / str : 0, mdi = str ? (100 * smdm) / str : 0;
+      const sum = pdi + mdi;
+      dxs.push({ dx: sum ? (100 * Math.abs(pdi - mdi)) / sum : 0, pdi, mdi });
+    }
+  }
+  if (dxs.length < n) return null;
+  let a = 0;
+  for (let i = 0; i < n; i++) a += dxs[i].dx;
+  a /= n;
+  for (let i = n; i < dxs.length; i++) a = (a * (n - 1) + dxs[i].dx) / n;
+  const lastD = dxs[dxs.length - 1];
+  return { adx: a, pdi: lastD.pdi, mdi: lastD.mdi };
+}
+
 /** candles: [[t(sec), low, high, open, close, volume], ...] oldest first */
 function compute(candles, cfg) {
   const m = macd(candles.map((x) => x[4]), cfg.MACD_FAST, cfg.MACD_SLOW, cfg.MACD_SIGNAL);
   return {
     t: candles.map((x) => x[0]), l: candles.map((x) => x[1]), h: candles.map((x) => x[2]),
-    o: candles.map((x) => x[3]), c: candles.map((x) => x[4]), hist: m.hist,
+    o: candles.map((x) => x[3]), c: candles.map((x) => x[4]), hist: m.hist, line: m.line,
   };
 }
 
@@ -98,6 +142,51 @@ function macdCross(ind, i) {
   if (a <= 0 && b > 0) return 1;
   if (a >= 0 && b < 0) return -1;
   return 0;
+}
+
+/**
+ * Rates a cross out of 8 points:
+ *   ADX >= 40: +3, >= 25: +2, >= 20: +1      (how strong is the trend)
+ *   +DI/-DI agree with the cross direction: +1
+ *   price on the right side of the 200-EMA: +2
+ *   MACD line on the right side of zero at the cross: +1
+ *   cross much sharper than recent candles: +1
+ *   RSI stretched against the cross (LONG > 75, SHORT < 25): -1
+ * 7-8 VERY STRONG, 5-6 STRONG, 3-4 MODERATE, 0-2 WEAK.
+ */
+function rate(side, ind, last, ci) {
+  const c = ind.c;
+  const a = adx14(ind.h, ind.l, c);
+  const r = rsi14(c);
+  const e = ema(c, 200), eLast = e[e.length - 1];
+  let pts = 0;
+
+  let trend = "no data";
+  if (a) {
+    pts += a.adx >= 40 ? 3 : a.adx >= 25 ? 2 : a.adx >= 20 ? 1 : 0;
+    if (side > 0 ? a.pdi > a.mdi : a.mdi > a.pdi) pts += 1;
+    const dir = a.pdi > a.mdi ? "uptrend" : "downtrend";
+    trend = a.adx >= 50 ? `very strong ${dir}` : a.adx >= 40 ? `strong ${dir}` : a.adx >= 25 ? dir
+      : a.adx >= 20 ? `weak ${dir}` : "choppy, no clear trend";
+  }
+
+  const emaOk = eLast != null && (side > 0 ? c[last] > eLast : c[last] < eLast);
+  if (emaOk) pts += 2;
+
+  const lineAtCross = ind.line[ci];
+  const zeroOk = lineAtCross != null && (side > 0 ? lineAtCross > 0 : lineAtCross < 0);
+  if (zeroOk) pts += 1;
+
+  let sum = 0, n = 0;
+  for (let j = Math.max(1, ci - 50); j < ci; j++) if (ind.hist[j] != null) { sum += Math.abs(ind.hist[j]); n++; }
+  const ratio = n && sum ? Math.abs(ind.hist[ci]) / (sum / n) : 1;
+  if (ratio >= 1.5) pts += 1;
+
+  if (r != null && (side > 0 ? r > 75 : r < 25)) pts -= 1;
+
+  const score = Math.max(0, pts);
+  const label = score >= 7 ? "VERY STRONG" : score >= 5 ? "STRONG" : score >= 3 ? "MODERATE" : "WEAK";
+  return { score, label, trend, adx: a ? a.adx : null, rsi: r, emaOk, zeroOk, ratio };
 }
 
 // ============================== ENGINE ==============================
@@ -284,12 +373,12 @@ async function refreshUniverse(env, cfg, s, now, volumes) {
   s.universeNote = (note ? note + ". " : "") + `${found} candidates, ${list.length} pass liquidity filter`;
 }
 
+// Runs fn over items one at a time with a pause, to stay under OKX's rate limit.
 async function mapLimit(items, limit, fn) {
-  let i = 0;
-  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (i < items.length) { const k = i++; await fn(items[k]); }
-  });
-  await Promise.all(workers);
+  for (const item of items) {
+    await fn(item);
+    await new Promise((r) => setTimeout(r, 300));
+  }
 }
 
 // ============================= SCREENER =============================
@@ -311,8 +400,9 @@ async function screenScan(cfg, s, volumes, now, lastClosedOpen) {
     for (let k = 0; k < MAX_CROSS_AGE && last - k >= 1; k++) {
       const side = macdCross(ind, last - k);
       if (!side) continue;
+      const rt = rate(side, ind, last, last - k);
       s.screen[sym] = { side, age: k + 1, crossT: ind.t[last - k], barT: ind.t[last], price: ind.c[last],
-        hist: ind.hist[last], strength: Math.abs(ind.hist[last - k]) / ind.c[last - k], vol: volumes[sym] ?? 0 };
+        hist: ind.hist[last], strength: Math.abs(ind.hist[last - k]) / ind.c[last - k], vol: volumes[sym] ?? 0, ...rt };
       break;
     }
   }
@@ -324,7 +414,7 @@ function screenData(s, cfg, age, now = nowSec()) {
     .filter(([sym]) => s.universe.includes(sym))
     .map(([sym, r]) => ({ sym, ...r, iz: !!s.zone[sym], age: r.age + Math.round((latest - r.barT) / gran) }))
     .filter((r) => r.age <= age)
-    .sort((a, b) => a.age - b.age || b.vol - a.vol);
+    .sort((a, b) => a.age - b.age || (b.score ?? -1) - (a.score ?? -1) || b.vol - a.vol);
   const scanned = s.universe.filter((x) => (s.screenBar[x] || 0) >= latest).length;
   return {
     mode: "screen", timeframe: `${gran / 60}m`, maxAge: age, latestCandleOpen: latest,
@@ -445,34 +535,46 @@ body{margin:0;padding:16px;background:var(--bg);color:var(--text);font:15px/1.45
 .wrap{max-width:760px;margin:auto}h1{font-size:18px;margin:0 0 2px}.mute{color:var(--mute)}.up{color:var(--up)}.down{color:var(--down)}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin:12px 0}
 .grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}.big{font-size:26px;font-weight:650}
-table{width:100%;border-collapse:collapse;font-size:14px}th{text-align:left;color:var(--mute);font-weight:500}td,th{padding:6px 4px;border-top:1px solid var(--line)}
+table{width:100%;border-collapse:collapse;font-size:14px}th{text-align:left;color:var(--mute);font-weight:500}td,th{padding:6px 4px;border-top:1px solid var(--line);vertical-align:top}
 .scroll{overflow-x:auto}.spark{width:100%;height:60px;color:var(--text)}ul{padding-left:18px;margin:6px 0}h2{font-size:14px;margin:0 0 8px;color:var(--mute);font-weight:600}
 .warn{color:var(--down)} .tag{font-size:10px;padding:1px 5px;border-radius:6px;border:1px solid var(--line);color:var(--mute);margin-left:4px}
 .tabs a{display:inline-block;margin-right:8px;padding:4px 10px;border:1px solid var(--line);border-radius:8px;color:var(--text);text-decoration:none;font-size:13px}
-.tabs a.on{background:var(--text);color:var(--bg)}`;
+.tabs a.on{background:var(--text);color:var(--bg)}
+.lv3{font-weight:800}.lv2{font-weight:700}.lv1{font-weight:600}.lv0{font-weight:500;color:var(--mute)}.small{font-size:12px}`;
 
 const usd = (n) => (n >= 1e6 ? "$" + (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? "$" + Math.round(n / 1e3) + "K" : "$" + Math.round(n));
-const hhmm = (t) => new Date(t * 1000).toISOString().slice(11, 16);
+// Times are shown in EAT (UTC+3)
+const hhmm = (t) => new Date((t + 3 * 3600) * 1000).toISOString().slice(11, 16);
+
+function ratingCell(r) {
+  if (!r.label) return `<span class="mute">updating...</span>`;
+  const lv = r.score >= 7 ? 3 : r.score >= 5 ? 2 : r.score >= 3 ? 1 : 0;
+  return `<span class="lv${lv}">${r.label}</span> <span class="mute">${r.score}/8</span><br>
+    <span class="mute small">${esc(r.trend)}${r.adx != null ? " · ADX " + Math.round(r.adx) : ""}${r.rsi != null ? " · RSI " + Math.round(r.rsi) : ""}<br>
+    200-EMA ${r.emaOk ? "✓" : "✗"} · zero-line ${r.zeroOk ? "✓" : "✗"}</span>`;
+}
 
 function screenPage(s, cfg, age) {
   const d = screenData(s, cfg, age);
   const ageTxt = (r) => (r.age === 1 ? "last candle" : `${r.age} candles ago`);
-  const tbl = (rows, cls) => `<div class="scroll"><table><tr><th>Coin</th><th>Crossed</th><th>Price</th><th>Strength</th><th>24h vol</th></tr>${
+  const tbl = (rows, cls) => `<div class="scroll"><table><tr><th>Coin</th><th>Crossed</th><th>Rating</th><th>Price</th><th>24h vol</th></tr>${
     rows.map((r) => `<tr><td><b>${esc(r.sym.replace("USDT", ""))}</b>${r.iz ? ' <span class="tag">IZ</span>' : ""}</td>
-      <td class="${cls}">${hhmm(r.crossT + cfg.GRANULARITY)} UTC<br><span class="mute">${ageTxt(r)}</span></td>
-      <td>${num(r.price)}</td><td>${(r.strength * 100).toFixed(3)}%</td><td>${usd(r.vol)}</td></tr>`).join("")
+      <td class="${cls}">${hhmm(r.crossT + cfg.GRANULARITY)} EAT<br><span class="mute">${ageTxt(r)}</span></td>
+      <td class="${cls}">${ratingCell(r)}</td>
+      <td>${num(r.price)}</td><td>${usd(r.vol)}</td></tr>`).join("")
     || `<tr><td colspan="5" class="mute">No coins match right now</td></tr>`}</table></div>`;
   const tabs = [1, 2, 3].map((n) => `<a href="?age=${n}" class="${n === age ? "on" : ""}">${n === 1 ? "Last candle" : "≤ " + n + " candles"}</a>`).join("");
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="60">
 <title>MACD Screener</title><style>${STYLE}</style></head><body><div class="wrap">
 <h1>MACD Screener (OKX) · ${d.timeframe}</h1>
-<div class="mute">Scanned ${d.scanned}/${d.total} coins for the ${hhmm(d.latestCandleOpen + cfg.GRANULARITY)} UTC candle close · ${esc(d.scope)} · updated ${ago(s.lastTick)}</div>
+<div class="mute">Scanned ${d.scanned}/${d.total} coins for the ${hhmm(d.latestCandleOpen + cfg.GRANULARITY)} EAT candle close · ${esc(d.scope)} · updated ${ago(s.lastTick)}</div>
 ${d.lastError ? `<div class="warn">Last error: ${esc(d.lastError)}</div>` : ""}
-<div class="card tabs">${tabs}<div class="mute" style="margin-top:8px;font-size:13px">Shows coins whose MACD (${cfg.MACD_FAST}/${cfg.MACD_SLOW}/${cfg.MACD_SIGNAL}) crossed its signal line within this many closed candles.</div></div>
+<div class="card tabs">${tabs}<div class="mute" style="margin-top:8px;font-size:13px">Shows coins whose MACD (${cfg.MACD_FAST}/${cfg.MACD_SLOW}/${cfg.MACD_SIGNAL}) crossed its signal line within this many closed candles. Times in EAT. Best-rated first.</div></div>
 <div class="card"><h2 class="up">LONG · MACD crossed UP (${d.long.length})</h2>${tbl(d.long, "up")}</div>
 <div class="card"><h2 class="down">SHORT · MACD crossed DOWN (${d.short.length})</h2>${tbl(d.short, "down")}</div>
-<div class="mute" style="font-size:12px">${esc(d.note)}. Screener only: no trades are placed. Strength = MACD histogram as % of price on the cross candle. Educational, not financial advice.</div></div></body></html>`;
+<div class="card small mute"><b>How to read the rating (out of 8).</b> ADX measures how strong the trend is: under 20 choppy, 25+ trending, 40+ strong, 50+ very strong. Points are added when the trend direction agrees with the cross, price is on the right side of the 200-EMA, the MACD line is on the right side of zero, and the cross is sharper than recent candles. A point is removed if RSI is already stretched (LONG above 75, SHORT below 25). VERY STRONG = 7-8, STRONG = 5-6, MODERATE = 3-4, WEAK = 0-2. ✓ means the check passed. This is a guide to trend quality on this timeframe, not a prediction.</div>
+<div class="mute" style="font-size:12px">${esc(d.note)}. Screener only: no trades are placed. Educational, not financial advice.</div></div></body></html>`;
 }
 
 function page(s, cfg) {
