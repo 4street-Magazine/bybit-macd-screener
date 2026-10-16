@@ -2,9 +2,9 @@ name = "okx-macd-screener"
 main = "src/index.js"
 compatibility_date = "2025-01-01"
 
-# Every 2 minutes (keeps KV writes under the free-plan daily limit)
+# Every 1 minute
 [triggers]
-crons = ["*/2 * * * *"]
+crons = ["*/1 * * * *"]
 
 [[kv_namespaces]]
 binding = "BOT_KV"
