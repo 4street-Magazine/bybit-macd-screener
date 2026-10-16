@@ -17,8 +17,20 @@ SYMBOLS = ""
 # Coins scanned per run (kept small to avoid OKX rate limits)
 SCREEN_BATCH = "15"
 
+# Leveraged paper-trading simulation driven by screener signals
+MODE = "sim"
+LEVERAGE = "8"
+SIM_MARGIN = "1"          # USDT margin per position at the start (8 USDT size at 8x)
+TP_MARGIN_PCT = "0.16"    # take profit = 16% of margin (2% price move)
+SL_MARGIN_PCT = "0.053"   # stop loss = 5.3% of margin (0.66% price move)
+TRAIL = "1"               # 1 = trailing stop on, 0 = fixed stop only
+TRAIL_START_PCT = "0.08"  # trailing starts after 8% of margin profit (1% price move)
+TRAIL_DIST_PCT = "0.06"   # then follows 6% of margin (0.75% price) behind the best price
+MIN_SCORE = "5"           # minimum rating out of 8 (5 = STRONG, 7 = VERY STRONG)
+MAX_POSITIONS = "60"      # slots = 60 x 1 USDT = 60 USDT total funds; profits are split evenly across them
+MAX_SYMBOLS = "60"        # coins scanned
+
 # Optional overrides:
-# MODE = "screen"              # "screen" = screener only (default), "trade" = MACD paper trading
-# MAX_SYMBOLS = "60"           # coins watched
+# MODE = "screen"              # "screen" = screener only (default), "sim" = leveraged paper sim, "trade" = old MACD paper bot
 # GRANULARITY = "900"          # 900 = 15m. Also: 3600 (1h), 14400 (4h)
 # MIN_QUOTE_VOLUME = "1000000" # skip coins with under $1M 24h volume
