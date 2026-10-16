@@ -40,11 +40,16 @@ const DEFAULTS = {
   KLINE_LIMIT: 300,
 
   // --- MODE "sim" ---
-  LEV_LOW: 10,                // leverage for coins under CAP_THRESHOLD (or unknown cap)
-  LEV_HIGH: 20,               // leverage for coins at/above CAP_THRESHOLD
-  CAP_THRESHOLD: 100000000,   // $100M market cap
-  SIM_MARGIN: 2.72,           // starting margin per position (USDT). Start funds = SIM_MARGIN x MAX_POSITIONS
+  LEV_FOLLOW: 30,             // leverage for coins that follow BTC
+  LEV_OTHER: 10,              // leverage for everything else
+  BTC_CORR: 0.6,              // a coin "follows BTC" when its return correlation with BTC is at least this
+  CORR_BARS: 100,             // candles used for the correlation
+  POSITION_SIZE: 10,          // every position is this many USDT of size (margin = size / leverage). 0 = use SIM_MARGIN instead
+  SIM_MARGIN: 1,              // start funds = SIM_MARGIN x MAX_POSITIONS (and margin per position when POSITION_SIZE = 0)
   MIN_SCORE: 0,               // minimum rating (0-8) to enter. 5 = STRONG only
+  TPSL_MODE: "size",          // "size" = TP/SL as % of POSITION SIZE (price move), "atr" = volatility-scaled
+  TP_SIZE_PCT: 0.16,          // size mode: take profit = 16% of position size
+  SL_SIZE_PCT: 0.053,         // size mode: stop loss = 5.3% of position size (capped at 90% of margin)
   SL_ATR: 1.5,                // stop distance = 1.5 x ATR
   MIN_SL_PCT: 0.0035,         // stop never tighter than 0.35% price move
   MAX_SL_MARGIN: 0.30,        // stop never risks more than 30% of margin
@@ -207,7 +212,7 @@ function newState(cfg) {
     closed: [], events: [], curve: [], mark: {}, equity: cfg.START_CASH,
     stats: { n: 0, wins: 0, gw: 0, gl: 0, sumPct: 0, longN: 0, longPnl: 0, shortN: 0, shortPnl: 0 },
     universe: [], universeAt: 0, universeSource: "", universeNote: "", zone: {},
-    screen: {}, screenBar: {}, caps: null, capsAt: 0,
+    screen: {}, screenBar: {}, btc: null,
     startedAt: nowSec(), lastTick: 0, lastError: null,
   };
 }
@@ -350,24 +355,28 @@ async function fetchKlines(cfg, sym, now) {
     .filter((c) => c[0] + cfg.GRANULARITY <= now);
 }
 
-/** Market caps (USD) from CoinGecko, top 750 coins. 3 subrequests, called only when the universe refreshes. */
-async function fetchCaps() {
-  const caps = {};
-  for (let page = 1; page <= 3; page++) {
-    const r = await fetch(`https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=250&page=${page}`, { headers: { Accept: "application/json" } });
-    if (!r.ok) throw new Error(`CoinGecko HTTP ${r.status}`);
-    for (const c of await r.json()) {
-      const sym = c.symbol.toUpperCase() + "USDT";
-      if (c.market_cap && !(sym in caps)) caps[sym] = c.market_cap;   // largest wins on duplicate tickers
-    }
+/** Pearson correlation of candle-to-candle returns between a coin and BTC (aligned by timestamp). */
+function btcCorr(kl, btcMap, n) {
+  if (!btcMap) return null;
+  const xs = [], ys = [];
+  for (let i = 1; i < kl.length; i++) {
+    const b0 = btcMap[kl[i - 1][0]], b1 = btcMap[kl[i][0]];
+    if (!b0 || !b1) continue;
+    xs.push(kl[i][4] / kl[i - 1][4] - 1);
+    ys.push(b1 / b0 - 1);
   }
-  return caps;
+  const m = Math.min(n, xs.length);
+  if (m < 30) return null;
+  const x = xs.slice(-m), y = ys.slice(-m);
+  const mx = x.reduce((a, v) => a + v, 0) / m, my = y.reduce((a, v) => a + v, 0) / m;
+  let sxy = 0, sxx = 0, syy = 0;
+  for (let i = 0; i < m; i++) { sxy += (x[i] - mx) * (y[i] - my); sxx += (x[i] - mx) ** 2; syy += (y[i] - my) ** 2; }
+  return sxx && syy ? sxy / Math.sqrt(sxx * syy) : null;
 }
 
-const levFor = (cfg, s, sym) => {
-  const cap = s.caps && s.caps[sym];
-  return cap && cap >= cfg.CAP_THRESHOLD ? cfg.LEV_HIGH : cfg.LEV_LOW;   // unknown cap = low leverage
-};
+/** 30x for BTC followers, 10x for the rest. */
+const isFollower = (cfg, r) => r.corr != null && r.corr >= cfg.BTC_CORR;
+const levFor = (cfg, r) => (isFollower(cfg, r) ? cfg.LEV_FOLLOW : cfg.LEV_OTHER);
 
 async function discoverPairs() {
   const list = await okx("/api/v5/public/instruments", { instType: "SPOT" });
@@ -411,6 +420,13 @@ async function mapLimit(items, limit, fn) {
 const MAX_CROSS_AGE = 5;
 
 async function screenScan(cfg, s, volumes, now, lastClosedOpen) {
+  // BTC closes, refreshed once per candle (1 subrequest) and cached in state
+  if (!s.btc || s.btc.bar < lastClosedOpen) {
+    try {
+      const bk = await fetchKlines(cfg, "BTCUSDT", now);
+      s.btc = { bar: lastClosedOpen, c: Object.fromEntries(bk.map((k) => [k[0], k[4]])) };
+    } catch (e) { s.lastError = "btc: " + e.message; }
+  }
   const need = s.universe.filter((sym) => (s.screenBar[sym] || 0) < lastClosedOpen).slice(0, cfg.SCREEN_BATCH);
   const klines = {};
   await mapLimit(need, 4, async (sym) => {
@@ -429,7 +445,7 @@ async function screenScan(cfg, s, volumes, now, lastClosedOpen) {
       const rt = rate(side, ind, last, last - k);
       s.screen[sym] = { side, age: k + 1, crossT: ind.t[last - k], barT: ind.t[last], price: ind.c[last],
         hist: ind.hist[last], strength: Math.abs(ind.hist[last - k]) / ind.c[last - k], vol: volumes[sym] ?? 0,
-        atr: atrPct(ind.h, ind.l, ind.c), ...rt };
+        atr: atrPct(ind.h, ind.l, ind.c), corr: btcCorr(kl, s.btc && s.btc.c, cfg.CORR_BARS), ...rt };
       break;
     }
   }
@@ -482,18 +498,25 @@ function simEvent(sim, kind, sym, t, info) {
 function simOpen(cfg, sim, sym, side, price, t, rt, lev) {
   if (sim.pos[sym] || Object.keys(sim.pos).length >= cfg.MAX_POSITIONS) return false;
   const fill = price * (1 + side * cfg.SIM_SLIP);
-  const margin = Math.min(sim.base, sim.cash / (1 + lev * cfg.SIM_FEE));
+  const want = cfg.POSITION_SIZE > 0 ? cfg.POSITION_SIZE / lev : sim.base;   // fixed size: 1 USDT margin at 10x, 0.5 at 20x
+  const margin = Math.min(want, sim.cash / (1 + lev * cfg.SIM_FEE));
   if (margin < 0.05) return false;
   const notional = margin * lev, qty = notional / fill, fee = notional * cfg.SIM_FEE;
   sim.cash -= margin + fee;
 
-  const atr = rt.atr ?? 0.004;
-  const slMove = Math.min(Math.max(atr * cfg.SL_ATR, cfg.MIN_SL_PCT), cfg.MAX_SL_MARGIN / lev);
-  const rr = cfg.RR_MIN + (cfg.RR_MAX - cfg.RR_MIN) * Math.min(rt.score ?? 0, 8) / 8;
-  const tpMove = slMove * rr;
+  let slMove, tpMove;
+  if (cfg.TPSL_MODE === "size") {
+    slMove = Math.min(cfg.SL_SIZE_PCT, 0.9 / lev);   // never beyond 90% of margin (liquidation)
+    tpMove = cfg.TP_SIZE_PCT;
+  } else {
+    const atr = rt.atr ?? 0.004;
+    slMove = Math.min(Math.max(atr * cfg.SL_ATR, cfg.MIN_SL_PCT), cfg.MAX_SL_MARGIN / lev);
+    tpMove = slMove * (cfg.RR_MIN + (cfg.RR_MAX - cfg.RR_MIN) * Math.min(rt.score ?? 0, 8) / 8);
+  }
+  const rr = tpMove / slMove;
 
   sim.pos[sym] = {
-    side, qty, entry: fill, best: fill, margin, fee, t, lev,
+    side, qty, entry: fill, best: fill, margin, fee, t, lev, btc: isFollower(cfg, rt), corr: rt.corr ?? null,
     chk: Math.floor(t / cfg.GRANULARITY) * cfg.GRANULARITY,
     label: rt.label, score: rt.score, adx: rt.adx, rsi: rt.rsi,
     tp: fill * (1 + side * tpMove), sl: fill * (1 - side * slMove),
@@ -501,7 +524,7 @@ function simOpen(cfg, sim, sym, side, price, t, rt, lev) {
   };
   sim.mark[sym] = price;
   simEvent(sim, "OPEN " + SIDE(side), sym, t,
-    `${rt.label} ${rt.score}/8, ${lev}x, margin ${margin.toFixed(3)} USDT, size ${notional.toFixed(2)} USDT, SL ${(slMove * 100).toFixed(2)}% TP ${(tpMove * 100).toFixed(2)}% (${rr.toFixed(1)}R)`);
+    `${rt.label} ${rt.score}/8, ${lev}x${isFollower(cfg, rt) ? " BTC-follower" : ""}, margin ${margin.toFixed(3)} USDT, size ${notional.toFixed(2)} USDT, SL ${(slMove * 100).toFixed(2)}% TP ${(tpMove * 100).toFixed(2)}% (${rr.toFixed(1)}R)`);
   return true;
 }
 
@@ -514,12 +537,12 @@ function simClose(cfg, sim, sym, fill, t, reason) {
   const exitFee = p.qty * fill * rate;
   sim.cash += Math.max(0, p.margin + gross - exitFee);
   const pnl = gross - exitFee - p.fee;
-  sim.closed.push({ sym, side: p.side, tIn: p.t, tOut: t, entry: p.entry, exit: fill, margin: p.margin, lev: p.lev, pnl, reason, label: p.label, score: p.score });
+  sim.closed.push({ sym, side: p.side, tIn: p.t, tOut: t, entry: p.entry, exit: fill, margin: p.margin, lev: p.lev, btc: p.btc, pnl, reason, label: p.label, score: p.score });
   if (sim.closed.length > 300) sim.closed.shift();
   const st = sim.stats;
   st.n++;
   st.pnl = (st.pnl || 0) + pnl;
-  if (pnl > 0) { st.wins++; st.gw += pnl; sim.base += pnl / cfg.MAX_POSITIONS; } else st.gl += -pnl;
+  if (pnl > 0) { st.wins++; st.gw += pnl; if (!(cfg.POSITION_SIZE > 0)) sim.base += pnl / cfg.MAX_POSITIONS; } else st.gl += -pnl;
   simEvent(sim, "CLOSE " + SIDE(p.side), sym, t, `${reason}, P&L ${pnl >= 0 ? "+" : ""}${pnl.toFixed(4)} USDT`);
 }
 
@@ -582,7 +605,7 @@ async function simStep(cfg, s, prices, now) {
   }
   cands.sort((a, b) => b.r.score - a.r.score || b.r.vol - a.r.vol);
   for (const { sym, r } of cands) {
-    if (simOpen(cfg, sim, sym, r.side, prices[sym], now, r, levFor(cfg, s, sym))) sim.lastCross[sym] = r.crossT;
+    if (simOpen(cfg, sim, sym, r.side, prices[sym], now, r, levFor(cfg, r))) sim.lastCross[sym] = r.crossT;
   }
   for (const k of Object.keys(sim.lastCross)) if (sim.lastCross[k] < now - 86400) delete sim.lastCross[k];
 
@@ -596,8 +619,8 @@ function simSummary(s, cfg) {
   const sim = s.sim || newSim(cfg), st = sim.stats, eq = simEquity(sim);
   const open = Object.entries(sim.pos).map(([sym, p]) => {
     const px = sim.mark[sym];
-    return { sym, side: SIDE(p.side), lev: p.lev || cfg.LEV_LOW, entry: p.entry, price: px, tp: p.tp, sl: p.sl,
-      margin: p.margin, size: p.margin * (p.lev || cfg.LEV_LOW), rating: `${p.label} ${p.score}/8`, pnlUsdt: posPnl(cfg, p, px) };
+    return { sym, side: SIDE(p.side), lev: p.lev || cfg.LEV_OTHER, btc: !!p.btc, corr: p.corr ?? null, entry: p.entry, price: px, tp: p.tp, sl: p.sl,
+      margin: p.margin, size: p.margin * (p.lev || cfg.LEV_OTHER), rating: `${p.label} ${p.score}/8`, pnlUsdt: posPnl(cfg, p, px) };
   });
   const unrealized = open.reduce((a, p) => a + p.pnlUsdt, 0);
   const realized = st.pnl || 0;
@@ -636,14 +659,6 @@ async function tick(env) {
 
   if (cfg.MODE === "sim") {
     if (!s.sim) s.sim = newSim(cfg);
-    // market caps for the leverage tiers (refreshed together with the universe, 3 subrequests)
-    if (s.universe.length && (!s.caps || (s.capsAt || 0) < s.universeAt)) {
-      try {
-        const all = await fetchCaps();
-        s.caps = Object.fromEntries(s.universe.filter((x) => all[x]).map((x) => [x, all[x]]));
-        s.capsAt = now;
-      } catch (e) { s.lastError = "caps: " + e.message; }
-    }
     await screenScan(cfg, s, volumes, now, lastClosedOpen);
     await simStep(cfg, s, prices, now);
     await env.BOT_KV.put("state", JSON.stringify(s));
@@ -763,7 +778,7 @@ function ratingCell(r) {
 function screenTables(d, cfg) {
   const ageTxt = (r) => (r.age === 1 ? "last candle" : `${r.age} candles ago`);
   const tbl = (rows, cls) => `<div class="scroll"><table><tr><th>Coin</th><th>Crossed</th><th>Rating</th><th>Price</th><th>24h vol</th></tr>${
-    rows.map((r) => `<tr><td><b>${esc(r.sym.replace("USDT", ""))}</b>${r.iz ? ' <span class="tag">IZ</span>' : ""}</td>
+    rows.map((r) => `<tr><td><b>${esc(r.sym.replace("USDT", ""))}</b>${r.iz ? ' <span class="tag">IZ</span>' : ""}${isFollower(cfg, r) ? ` <span class="tag">BTC ${cfg.LEV_FOLLOW}x</span>` : ""}${r.corr != null ? `<br><span class="mute small">BTC corr ${r.corr.toFixed(2)}</span>` : ""}</td>
       <td class="${cls}">${hhmm(r.crossT + cfg.GRANULARITY)} EAT<br><span class="mute">${ageTxt(r)}</span></td>
       <td class="${cls}">${ratingCell(r)}</td>
       <td>${num(r.price)}</td><td>${usd(r.vol)}</td></tr>`).join("")
@@ -789,19 +804,19 @@ ${screenTables(d, cfg)}
 
 function simPage(s, cfg, tab = "sim", age = 1) {
   const sim = s.sim || newSim(cfg), m = simSummary(s, cfg), scr = screenData(s, cfg, age);
-  const rows = m.openPositions.map((p) => `<tr><td><b>${esc(p.sym.replace("USDT", ""))}</b><br><span class="mute small">${p.lev}x</span></td><td class="${p.side === "LONG" ? "up" : "down"}">${p.side}</td>
+  const rows = m.openPositions.map((p) => `<tr><td><b>${esc(p.sym.replace("USDT", ""))}</b><br><span class="mute small">${p.lev}x${p.btc ? " · BTC" : ""}</span></td><td class="${p.side === "LONG" ? "up" : "down"}">${p.side}</td>
     <td>${num(p.entry)}<br><span class="mute small">TP ${num(p.tp)} · SL ${num(p.sl)}</span></td><td>${p.price ? num(p.price) : "-"}</td>
     <td class="${clr(p.pnlUsdt)}">${usdt(p.pnlUsdt)}<br><span class="mute small">size ${p.size.toFixed(2)}</span></td><td class="mute small">${esc(p.rating)}</td></tr>`).join("")
     || `<tr><td colspan="6" class="mute">No open positions</td></tr>`;
-  const trades = sim.closed.slice(-15).reverse().map((t) => `<tr><td>${esc(t.sym.replace("USDT", ""))}<br><span class="mute small">${t.lev || ""}${t.lev ? "x" : ""}</span></td><td>${t.side > 0 ? "LONG" : "SHORT"}</td>
+  const trades = sim.closed.slice(-15).reverse().map((t) => `<tr><td>${esc(t.sym.replace("USDT", ""))}<br><span class="mute small">${t.lev || ""}${t.lev ? "x" : ""}${t.btc ? " · BTC" : ""}</span></td><td>${t.side > 0 ? "LONG" : "SHORT"}</td>
     <td class="${clr(t.pnl)}">${usdt(t.pnl)}</td><td class="mute small">${esc(t.reason)}<br>${esc(t.label)} ${t.score}/8 · ${hhmm(t.tOut)} EAT</td></tr>`).join("")
     || `<tr><td colspan="4" class="mute">No closed trades yet</td></tr>`;
   const events = sim.events.slice(0, 10).map((e) => `<li><b>${esc(e.kind)}</b> ${esc(e.sym.replace("USDT", ""))} <span class="mute">${esc(e.info)}</span></li>`).join("");
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="60">
 <title>MACD Leverage Sim</title><style>${STYLE}</style></head><body><div class="wrap">
-<h1>MACD Screener Sim · ${cfg.LEV_LOW}x / ${cfg.LEV_HIGH}x paper trades</h1>
-<div class="mute">Fake money · ${cfg.GRANULARITY / 60}m candles · ${cfg.MIN_SCORE > 0 ? `enters ${cfg.MIN_SCORE}+/8 crosses` : "trades every cross on the last candle"} · ${cfg.LEV_HIGH}x if market cap ≥ ${usd(cfg.CAP_THRESHOLD)}, else ${cfg.LEV_LOW}x · stop ${cfg.SL_ATR}×ATR, target ${cfg.RR_MIN}-${cfg.RR_MAX}R by rating${cfg.TRAIL ? ", trailing" : ""} · updated ${ago(s.lastTick)}</div>
+<h1>MACD Screener Sim · ${cfg.LEV_OTHER}x / ${cfg.LEV_FOLLOW}x paper trades</h1>
+<div class="mute">Fake money · ${cfg.GRANULARITY / 60}m candles · ${cfg.MIN_SCORE > 0 ? `enters ${cfg.MIN_SCORE}+/8 crosses` : "trades every cross on the last candle"} · ${cfg.LEV_FOLLOW}x for BTC followers (corr ≥ ${cfg.BTC_CORR}), else ${cfg.LEV_OTHER}x · ${cfg.TPSL_MODE === "size" ? `TP ${(cfg.TP_SIZE_PCT * 100).toFixed(1)}% / SL ${(cfg.SL_SIZE_PCT * 100).toFixed(1)}% of position size` : `stop ${cfg.SL_ATR}×ATR, target ${cfg.RR_MIN}-${cfg.RR_MAX}R by rating`}${cfg.TRAIL ? ", trailing" : ""} · updated ${ago(s.lastTick)}</div>
 ${m.lastError ? `<div class="warn">Last error: ${esc(m.lastError)}</div>` : ""}
 <div class="card tabs"><a href="?tab=sim" class="${tab === "sim" ? "on" : ""}">Sim trades (${m.openPositions.length} open)</a><a href="?tab=coins" class="${tab === "coins" ? "on" : ""}">Coins (${scr.long.length + scr.short.length} crossed)</a></div>
 ${tab === "coins" ? `<div class="card tabs"><div class="mute small" style="margin-bottom:8px">Scanned ${scr.scanned}/${scr.total} coins for the ${hhmm(scr.latestCandleOpen + cfg.GRANULARITY)} EAT candle close. Coins that crossed on the last closed candle get a trade; the others are shown for reference.</div>${[1, 2, 3].map((n) => `<a href="?tab=coins&age=${n}" class="${n === age ? "on" : ""}">${n === 1 ? "Last candle" : "≤ " + n + " candles"}</a>`).join("")}</div>
@@ -810,7 +825,7 @@ ${screenTables(scr, cfg)}` : `<div class="card"><div class="grid">
 <div><div class="mute">Equity (started ${usdtPlain(m.start)})</div><div class="big">${usdtPlain(m.equity, 4)}</div></div>
 <div><div class="mute">Realized (closed trades)</div><span class="${clr(m.realizedPnlUsdt)}">${usdt(m.realizedPnlUsdt)}</span></div>
 <div><div class="mute">Unrealized (open positions)</div><span class="${clr(m.unrealizedPnlUsdt)}">${usdt(m.unrealizedPnlUsdt)}</span></div>
-<div><div class="mute">Margin per new position</div>${usdtPlain(m.marginPerPosition, 4)}</div>
+<div><div class="mute">Size per position</div>${cfg.POSITION_SIZE > 0 ? usdtPlain(cfg.POSITION_SIZE, 2) : usdtPlain(m.marginPerPosition, 4) + " margin"}</div>
 <div><div class="mute">Drawdown from peak</div>${usdtPlain(m.drawdownUsdt, 4)}</div></div>${sparkline(sim.curve)}</div>
 <div class="card"><h2>OPEN POSITIONS (${m.openPositions.length}/${cfg.MAX_POSITIONS})</h2><div class="scroll"><table><tr><th>Coin</th><th>Side</th><th>Entry</th><th>Now</th><th>P&amp;L (net)</th><th>Rating</th></tr>${rows}</table></div></div>
 <div class="card"><h2>CLOSED TRADES · ${m.trades.count} total${m.trades.winRate != null ? ` · ${m.trades.wins} wins (${(m.trades.winRate * 100).toFixed(0)}%) · PF ${m.trades.profitFactor ? m.trades.profitFactor.toFixed(2) : "∞"}` : ""}</h2>
