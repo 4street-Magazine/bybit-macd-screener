@@ -12,14 +12,13 @@ id = "93a9f4b9f8b64f94b6e665f4a5015cf1"
 
 [vars]
 # "auto" = scan the most-traded OKX USDT pairs.
-# If discovery fails, the bot uses SYMBOLS below instead.
 UNIVERSE_MODE = "auto"
-# Fallback list, comma separated, e.g. "BTC,ETH,SOL"
 SYMBOLS = ""
+# Coins scanned per run (kept small to avoid OKX rate limits)
+SCREEN_BATCH = "15"
 
-# Optional overrides (defaults live at the top of src/index.js):
+# Optional overrides:
 # MODE = "screen"              # "screen" = screener only (default), "trade" = MACD paper trading
 # MAX_SYMBOLS = "60"           # coins watched
-# SCREEN_BATCH = "40"          # coins scanned per run. Free plan: keep <= 40.
 # GRANULARITY = "900"          # 900 = 15m. Also: 3600 (1h), 14400 (4h)
 # MIN_QUOTE_VOLUME = "1000000" # skip coins with under $1M 24h volume
