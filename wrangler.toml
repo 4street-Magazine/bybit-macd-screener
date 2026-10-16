@@ -20,25 +20,17 @@ SCREEN_BATCH = "35"       # coins scanned per run
 SIM_CHECK_BATCH = "10"    # open positions re-checked per run
 MAX_SYMBOLS = "60"        # coins watched
 MAX_POSITIONS = "22"      # open positions at once
-POSITION_MARGIN = "1"     # every position = 1 USDT margin; size = 1 x leverage (10x = 10 USDT, 30x = 30 USDT)
-SIM_MARGIN = "1.1"        # start funds = 1.1 x 22 = 24.2 USDT (a little extra for fees)
+SIM_MARGIN = "2.72"       # margin per position (USDT); start funds = 2.72 x 22 = 59.84 USDT
 
-LEV_FOLLOW = "30"         # coins that follow BTC
-LEV_OTHER = "10"          # all other coins
-FOLLOWERS = "BTC,ETH,SOL,XRP,DOGE,ADA,AVAX,LINK,DOT,LTC,BCH,SHIB,PEPE,BONK,WIF,FLOKI,NEAR,APT,ARB,OP,SUI,INJ,ATOM,UNI,AAVE,FIL,ETC,HBAR,ICP,TIA,SEI,RENDER,FET,TON"   # always 30x
-BTC_CORR = "0.6"          # follower = return correlation with BTC of 0.6 or more
-CORR_BARS = "100"         # candles used for the correlation
-FOLLOWERS_ONLY = "1"      # 1 = scan and trade only BTC followers
+LEV_LOW = "10"            # market cap under the threshold (or unknown)
+LEV_HIGH = "20"           # market cap at/above the threshold
+CAP_THRESHOLD = "100000000"
 
-TPSL_MODE = "size"        # "size" = % of position size, "atr" = volatility-scaled
-TP_USDT = "0.04"          # NET profit (USDT) at which the retracing stop switches on. 0 = old fixed-TP mode
-TP_SIZE_PCT = "0.16"      # only used when TP_USDT = 0
-SL_SIZE_PCT = "0.053"     # stop loss = 5.3% of position size (consider lowering, e.g. 0.01)
 SL_ATR = "1.5"            # stop = 1.5 x ATR
 RR_MIN = "1.5"            # reward:risk at rating 0
 RR_MAX = "3"              # reward:risk at rating 8
 MIN_SL_PCT = "0.0035"
 MAX_SL_MARGIN = "0.30"
-TRAIL = "1"               # must stay 1 when TP_USDT > 0
+TRAIL = "1"
 TRAIL_GIVEBACK = "0.4"    # give back at most 40% of the best profit
 MIN_SCORE = "5"           # 5 = STRONG only, 0 = every cross
