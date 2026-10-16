@@ -4,10 +4,11 @@
  * MODE "screen": scanner only. MODE "sim": leveraged PAPER trades from screener crosses (fake money).
  * MODE "trade": old MACD stop-and-reverse paper bot.
  *
- * SIM features: tiered leverage by market cap (CoinGecko), ATR-scaled stop, rating-scaled target,
- * trailing stop, maker fee on TP exits, all P&L shown in USDT.
+ * SIM features: BTC-follower leverage (30x) vs other coins (10x), fixed margin per position,
+ * TP_USDT: when a position reaches +TP_USDT net profit it is NOT closed; a retracing stop takes over
+ * and follows the best price, giving back at most TRAIL_GIVEBACK of the peak profit. All P&L in USDT.
  *
- * Endpoints: GET /  GET /api/status  GET /api/trades  GET /api/universe  GET /api/screen
+ * Endpoints: GET /  GET /api/status  GET /api/trades  GET /api/universe  GET /api/screen  GET /api/followers
  *            POST /api/run  POST /api/reset   (Authorization: Bearer <ADMIN_TOKEN>)
  * Educational only. Not financial advice.
  */
@@ -45,18 +46,19 @@ const DEFAULTS = {
   FOLLOWERS: "",              // comma list of coins always treated as BTC followers, e.g. "DOGE,PEPE,SHIB"
   BTC_CORR: 0.6,              // a coin "follows BTC" when its return correlation with BTC is at least this
   CORR_BARS: 100,             // candles used for the correlation
-  POSITION_MARGIN: 1,         // every position uses this much margin (USDT); size = margin x leverage (10x = 10 USDT, 30x = 30 USDT). 0 = compounding margin
+  POSITION_MARGIN: 1,         // every position uses this much margin (USDT); size = margin x leverage. 0 = compounding margin
   SIM_MARGIN: 1.1,            // start funds = SIM_MARGIN x MAX_POSITIONS (a little above POSITION_MARGIN to cover fees)
   MIN_SCORE: 0,               // minimum rating (0-8) to enter. 5 = STRONG only
   TPSL_MODE: "size",          // "size" = TP/SL as % of POSITION SIZE (price move), "atr" = volatility-scaled
-  TP_SIZE_PCT: 0.16,          // size mode: take profit = 16% of position size
+  TP_USDT: 0.04,              // NET profit (USDT, after fees) at which the retracing stop switches on. 0 = old fixed-TP mode
+  TP_SIZE_PCT: 0.16,          // size mode (only when TP_USDT = 0): take profit = 16% of position size
   SL_SIZE_PCT: 0.053,         // size mode: stop loss = 5.3% of position size (capped at 90% of margin)
   SL_ATR: 1.5,                // stop distance = 1.5 x ATR
   MIN_SL_PCT: 0.0035,         // stop never tighter than 0.35% price move
   MAX_SL_MARGIN: 0.30,        // stop never risks more than 30% of margin
   RR_MIN: 1.5,                // reward:risk for a rating-0 cross
   RR_MAX: 3,                  // reward:risk for a rating-8 cross
-  TRAIL: 1,                   // 1 = trailing stop on (starts at half the TP distance)
+  TRAIL: 1,                   // 1 = trailing stop on (must stay on when TP_USDT > 0)
   TRAIL_GIVEBACK: 0.4,        // once trailing, the stop allows giving back at most 40% of the best profit so far
   SIM_FEE: 0.0005,            // taker fee per side, on notional
   SIM_FEE_MAKER: 0.0002,      // maker fee, used for take-profit exits
@@ -472,9 +474,10 @@ function screenData(s, cfg, age, now = nowSec()) {
 }
 
 // ========================= LEVERAGED SIM (MODE "sim") =========================
-// Stop = SL_ATR x ATR (clamped). Target = stop x reward:risk, where reward:risk scales from RR_MIN
-// (rating 0) to RR_MAX (rating 8). When a trade wins, its net profit is split evenly across all
-// MAX_POSITIONS slots, so every future position's margin grows by profit / MAX_POSITIONS.
+// Stop = SL_SIZE_PCT of position size (or SL_ATR x ATR in "atr" mode).
+// Target: when TP_USDT > 0, a position that reaches +TP_USDT NET profit is NOT closed. The retracing
+// stop switches on and trails the best price, giving back at most TRAIL_GIVEBACK of the peak profit.
+// When TP_USDT = 0 the old fixed take-profit is used.
 function newSim(cfg) {
   const start = cfg.SIM_MARGIN * cfg.MAX_POSITIONS;
   return { start, cash: start, base: cfg.SIM_MARGIN, pos: {}, closed: [], events: [], curve: [], mark: {},
@@ -517,6 +520,14 @@ function simOpen(cfg, sim, sym, side, price, t, rt, lev) {
     slMove = Math.min(Math.max(atr * cfg.SL_ATR, cfg.MIN_SL_PCT), cfg.MAX_SL_MARGIN / lev);
     tpMove = slMove * (cfg.RR_MIN + (cfg.RR_MAX - cfg.RR_MIN) * Math.min(rt.score ?? 0, 8) / 8);
   }
+
+  // TP_USDT: price move that gives +TP_USDT NET profit (entry fee + estimated exit fee included).
+  // The position is not closed there: the retracing stop starts trailing from this level.
+  let trailStart = tpMove * 0.5;
+  if (cfg.TP_USDT > 0) {
+    tpMove = (cfg.TP_USDT + fee + notional * cfg.SIM_FEE) / notional;
+    trailStart = tpMove;
+  }
   const rr = tpMove / slMove;
 
   sim.pos[sym] = {
@@ -524,11 +535,12 @@ function simOpen(cfg, sim, sym, side, price, t, rt, lev) {
     chk: Math.floor(t / cfg.GRANULARITY) * cfg.GRANULARITY,
     label: rt.label, score: rt.score, adx: rt.adx, rsi: rt.rsi,
     tp: fill * (1 + side * tpMove), sl: fill * (1 - side * slMove),
-    ts: tpMove * 0.5, td: slMove, rr,
+    ts: trailStart, td: slMove, rr, trailing: false,
   };
   sim.mark[sym] = price;
+  const tpTxt = cfg.TP_USDT > 0 ? `trail starts at +${cfg.TP_USDT} USDT net (${(tpMove * 100).toFixed(2)}% move)` : `TP ${(tpMove * 100).toFixed(2)}% (${rr.toFixed(1)}R)`;
   simEvent(sim, "OPEN " + SIDE(side), sym, t,
-    `${rt.label} ${rt.score}/8, ${lev}x${isFollower(cfg, rt, sym) ? " BTC-follower" : ""}, margin ${margin.toFixed(3)} USDT, size ${notional.toFixed(2)} USDT, SL ${(slMove * 100).toFixed(2)}% TP ${(tpMove * 100).toFixed(2)}% (${rr.toFixed(1)}R)`);
+    `${rt.label} ${rt.score}/8, ${lev}x${isFollower(cfg, rt, sym) ? " BTC-follower" : ""}, margin ${margin.toFixed(3)} USDT, size ${notional.toFixed(2)} USDT, SL ${(slMove * 100).toFixed(2)}%, ${tpTxt}`);
   return true;
 }
 
@@ -550,19 +562,23 @@ function simClose(cfg, sim, sym, fill, t, reason) {
   simEvent(sim, "CLOSE " + SIDE(p.side), sym, t, `${reason}, P&L ${pnl >= 0 ? "+" : ""}${pnl.toFixed(4)} USDT`);
 }
 
-/** Retracing stop: starts at half the TP distance, then locks in (1 - TRAIL_GIVEBACK) of the best profit reached. Never loosens. */
+/** Retracing stop: starts once the position reaches the trail-start level (TP_USDT net, or half the TP distance in the
+ *  old mode), then locks in (1 - TRAIL_GIVEBACK) of the best profit reached. Never loosens. */
 function simTrail(cfg, p, h, l) {
   if (!cfg.TRAIL || !p.td) return;
   if (p.side > 0) p.best = Math.max(p.best, h); else p.best = Math.min(p.best, l);
   const peak = p.side * (p.best / p.entry - 1);                     // best profit so far, as a price move
   if (peak < p.ts) return;
   const sl = p.entry * (1 + p.side * peak * (1 - cfg.TRAIL_GIVEBACK));
-  if (p.side > 0 ? sl > p.sl : sl < p.sl) p.sl = sl;
+  if (p.side > 0 ? sl > p.sl : sl < p.sl) { p.sl = sl; p.trailing = true; }
 }
 
 function simExit(cfg, p, o, h, l) {
   const s = p.side;
-  if (s > 0 ? l <= p.sl : h >= p.sl) return { px: (s > 0 ? Math.min(o, p.sl) : Math.max(o, p.sl)) * (1 - s * cfg.SIM_SLIP), reason: "stop loss" };
+  if (s > 0 ? l <= p.sl : h >= p.sl) {
+    return { px: (s > 0 ? Math.min(o, p.sl) : Math.max(o, p.sl)) * (1 - s * cfg.SIM_SLIP), reason: p.trailing ? "trailing stop" : "stop loss" };
+  }
+  if (cfg.TP_USDT > 0 && cfg.TRAIL) return null;   // no hard TP: the retracing stop takes over
   if (s > 0 ? h >= p.tp : l <= p.tp) return { px: s > 0 ? Math.max(o, p.tp) : Math.min(o, p.tp), reason: "take profit" };
   return null;
 }
@@ -596,7 +612,7 @@ async function simStep(cfg, s, prices, now) {
     if (!px) continue;
     const x = simExit(cfg, p, px, px, px);
     if (x) simClose(cfg, sim, sym, x.px, now, x.reason + " (live)");
-    else { sim.mark[sym] = px; simTrail(cfg, p, px, px); }
+    else { sim.mark[sym] = px; p.pxT = now; simTrail(cfg, p, px, px); }
   }
 
   // 2) entries: crosses on the latest closed candle that meet the minimum rating
@@ -624,13 +640,13 @@ function simSummary(s, cfg) {
   const open = Object.entries(sim.pos).map(([sym, p]) => {
     const px = sim.mark[sym];
     return { sym, side: SIDE(p.side), lev: p.lev || cfg.LEV_OTHER, btc: !!p.btc, corr: p.corr ?? null, entry: p.entry, price: px, tp: p.tp, sl: p.sl,
-      margin: p.margin, size: p.margin * (p.lev || cfg.LEV_OTHER), rating: `${p.label} ${p.score}/8`, pnlUsdt: posPnl(cfg, p, px) };
+      trailing: !!p.trailing, pxT: p.pxT || null, margin: p.margin, size: p.margin * (p.lev || cfg.LEV_OTHER), rating: `${p.label} ${p.score}/8`, pnlUsdt: posPnl(cfg, p, px) };
   });
   const unrealized = open.reduce((a, p) => a + p.pnlUsdt, 0);
   const realized = st.pnl || 0;
   return {
     mode: "sim", minScore: cfg.MIN_SCORE,
-    equity: eq, start: sim.start, cash: sim.cash,
+    equity: eq, start: sim.start, cash: sim.cash, marginInUse: open.reduce((a, p) => a + p.margin, 0),
     totalPnlUsdt: realized + unrealized, realizedPnlUsdt: realized, unrealizedPnlUsdt: unrealized,
     marginPerPosition: sim.base, drawdownUsdt: sim.peak - eq,
     openPositions: open,
@@ -827,19 +843,23 @@ ${screenTables(d, cfg)}
 
 function simPage(s, cfg, tab = "sim", age = 1) {
   const sim = s.sim || newSim(cfg), m = simSummary(s, cfg), scr = screenData(s, cfg, age);
+  const tpLabel = cfg.TP_USDT > 0 ? "Trail from" : "TP";
   const rows = m.openPositions.map((p) => `<tr><td><b>${esc(p.sym.replace("USDT", ""))}</b><br><span class="mute small">${p.lev}x${p.btc ? " · BTC" : ""}</span></td><td class="${p.side === "LONG" ? "up" : "down"}">${p.side}</td>
-    <td>${num(p.entry)}<br><span class="mute small">TP ${num(p.tp)} · SL ${num(p.sl)}</span></td><td>${p.price ? num(p.price) : "-"}</td>
+    <td>${num(p.entry)}<br><span class="mute small">${tpLabel} ${num(p.tp)} · SL ${num(p.sl)}${p.trailing ? " · trailing" : ""}</span></td><td>${p.price ? num(p.price) : "-"}<br><span class="mute small">${p.pxT ? ago(p.pxT) : ""}</span></td>
     <td class="${clr(p.pnlUsdt)}">${usdt(p.pnlUsdt)}<br><span class="mute small">size ${p.size.toFixed(2)}</span></td><td class="mute small">${esc(p.rating)}</td></tr>`).join("")
     || `<tr><td colspan="6" class="mute">No open positions</td></tr>`;
   const trades = sim.closed.slice(-15).reverse().map((t) => `<tr><td>${esc(t.sym.replace("USDT", ""))}<br><span class="mute small">${t.lev || ""}${t.lev ? "x" : ""}${t.btc ? " · BTC" : ""}</span></td><td>${t.side > 0 ? "LONG" : "SHORT"}</td>
     <td class="${clr(t.pnl)}">${usdt(t.pnl)}</td><td class="mute small">${esc(t.reason)}<br>${esc(t.label)} ${t.score}/8 · ${hhmm(t.tOut)} EAT</td></tr>`).join("")
     || `<tr><td colspan="4" class="mute">No closed trades yet</td></tr>`;
   const events = sim.events.slice(0, 10).map((e) => `<li><b>${esc(e.kind)}</b> ${esc(e.sym.replace("USDT", ""))} <span class="mute">${esc(e.info)}</span></li>`).join("");
+  const tpHeader = cfg.TP_USDT > 0
+    ? `retracing stop starts at +${cfg.TP_USDT} USDT net, SL ${(cfg.SL_SIZE_PCT * 100).toFixed(1)}% of size`
+    : cfg.TPSL_MODE === "size" ? `TP ${(cfg.TP_SIZE_PCT * 100).toFixed(1)}% / SL ${(cfg.SL_SIZE_PCT * 100).toFixed(1)}% of position size` : `stop ${cfg.SL_ATR}×ATR, target ${cfg.RR_MIN}-${cfg.RR_MAX}R by rating`;
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="60">
 <title>MACD Leverage Sim</title><style>${STYLE}</style></head><body><div class="wrap">
 <h1>MACD Screener Sim · ${cfg.LEV_OTHER}x / ${cfg.LEV_FOLLOW}x paper trades</h1>
-<div class="mute">Fake money · ${cfg.GRANULARITY / 60}m candles · ${cfg.MIN_SCORE > 0 ? `enters ${cfg.MIN_SCORE}+/8 crosses` : "trades every cross on the last candle"} · ${cfg.LEV_FOLLOW}x for BTC followers (corr ≥ ${cfg.BTC_CORR}), else ${cfg.LEV_OTHER}x · ${cfg.TPSL_MODE === "size" ? `TP ${(cfg.TP_SIZE_PCT * 100).toFixed(1)}% / SL ${(cfg.SL_SIZE_PCT * 100).toFixed(1)}% of position size` : `stop ${cfg.SL_ATR}×ATR, target ${cfg.RR_MIN}-${cfg.RR_MAX}R by rating`}${cfg.TRAIL ? ", trailing" : ""} · updated ${ago(s.lastTick)}</div>
+<div class="mute">Fake money · ${cfg.GRANULARITY / 60}m candles · ${cfg.MIN_SCORE > 0 ? `enters ${cfg.MIN_SCORE}+/8 crosses` : "trades every cross on the last candle"} · ${cfg.LEV_FOLLOW}x for BTC followers (corr ≥ ${cfg.BTC_CORR}), else ${cfg.LEV_OTHER}x · ${tpHeader}${cfg.TRAIL ? `, trailing (gives back max ${(cfg.TRAIL_GIVEBACK * 100).toFixed(0)}%)` : ""} · updated ${ago(s.lastTick)}</div>
 ${m.lastError ? `<div class="warn">Last error: ${esc(m.lastError)}</div>` : ""}
 <div class="card tabs"><a href="?tab=sim" class="${tab === "sim" ? "on" : ""}">Sim trades (${m.openPositions.length} open)</a><a href="?tab=coins" class="${tab === "coins" ? "on" : ""}">Coins (${scr.long.length + scr.short.length} crossed)</a><a href="?tab=btc" class="${tab === "btc" ? "on" : ""}">BTC list</a></div>
 ${tab === "btc" ? followersCard(s, cfg) : tab === "coins" ? `<div class="card tabs"><div class="mute small" style="margin-bottom:8px">Scanned ${scr.scanned}/${scr.total} coins for the ${hhmm(scr.latestCandleOpen + cfg.GRANULARITY)} EAT candle close. Coins that crossed on the last closed candle get a trade; the others are shown for reference.</div>${[1, 2, 3].map((n) => `<a href="?tab=coins&age=${n}" class="${n === age ? "on" : ""}">${n === 1 ? "Last candle" : "≤ " + n + " candles"}</a>`).join("")}</div>
@@ -849,6 +869,8 @@ ${screenTables(scr, cfg)}` : `<div class="card"><div class="grid">
 <div><div class="mute">Realized (closed trades)</div><span class="${clr(m.realizedPnlUsdt)}">${usdt(m.realizedPnlUsdt)}</span></div>
 <div><div class="mute">Unrealized (open positions)</div><span class="${clr(m.unrealizedPnlUsdt)}">${usdt(m.unrealizedPnlUsdt)}</span></div>
 <div><div class="mute">Margin per position</div>${usdtPlain(cfg.POSITION_MARGIN > 0 ? cfg.POSITION_MARGIN : m.marginPerPosition, 2)} <span class="mute small">(${cfg.LEV_OTHER}x = ${((cfg.POSITION_MARGIN > 0 ? cfg.POSITION_MARGIN : m.marginPerPosition) * cfg.LEV_OTHER).toFixed(0)}, ${cfg.LEV_FOLLOW}x = ${((cfg.POSITION_MARGIN > 0 ? cfg.POSITION_MARGIN : m.marginPerPosition) * cfg.LEV_FOLLOW).toFixed(0)} USDT size)</span></div>
+<div><div class="mute">Free cash</div>${usdtPlain(m.cash, 4)}</div>
+<div><div class="mute">Margin in use (${m.openPositions.length} open)</div>${usdtPlain(m.marginInUse, 2)}</div>
 <div><div class="mute">Drawdown from peak</div>${usdtPlain(m.drawdownUsdt, 4)}</div></div>${sparkline(sim.curve)}</div>
 <div class="card"><h2>OPEN POSITIONS (${m.openPositions.length}/${cfg.MAX_POSITIONS})</h2><div class="scroll"><table><tr><th>Coin</th><th>Side</th><th>Entry</th><th>Now</th><th>P&amp;L (net)</th><th>Rating</th></tr>${rows}</table></div></div>
 <div class="card"><h2>CLOSED TRADES · ${m.trades.count} total${m.trades.winRate != null ? ` · ${m.trades.wins} wins (${(m.trades.winRate * 100).toFixed(0)}%) · PF ${m.trades.profitFactor ? m.trades.profitFactor.toFixed(2) : "∞"}` : ""}</h2>
