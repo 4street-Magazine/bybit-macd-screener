@@ -17,7 +17,7 @@
 const OKX_HOST = "https://www.okx.com";
 
 const DEFAULTS = {
-  GRANULARITY: 300,           // seconds: 300 (5m), 900 (15m), 3600, 14400, 86400
+  GRANULARITY: 900,           // seconds: 300 (5m), 900 (15m), 3600, 14400, 86400
   MODE: "sim",                // "screen" | "sim" | "trade"
   SCREEN_BATCH: 35,           // coins scanned per run (free plan: max 50 subrequests per run)
   START_CASH: 10000,
@@ -887,7 +887,7 @@ ${screenTables(scr, cfg)}` : `<div class="card"><div class="grid">
 <div><div class="mute">Free cash</div>${usdtPlain(m.cash, 4)}</div>
 <div><div class="mute">Margin in use (${m.openPositions.length} open)</div>${usdtPlain(m.marginInUse, 2)}</div>
 <div><div class="mute">Drawdown from peak</div>${usdtPlain(m.drawdownUsdt, 4)}</div></div>${sparkline(sim.curve)}</div>
-<div class="card"><h2>OPEN POSITIONS (${m.openPositions.length}/${cfg.MAX_POSITIONS})</h2><div class="scroll"><table><tr><th>Coin</th><th>Side</th><th>Entry</th><th>Now</th><th>P&amp;L (net)</th><th>Rating</th></tr>${rows}</table></div></div>
+<div class="card"><h2>OPEN POSITIONS (${m.openPositions.length}/${cfg.MAX_POSITIONS})</h2><div class="scroll"><table><tr><th>Coin</th><th>Side</th><th>Entry</th><th>Now</th><th>P&amp;L (net)</th><th>Rating</th></tr>{rows}</table></div></div>
 <div class="card"><h2>TRADE HISTORY · ${m.trades.count} closed</h2><div class="grid">
 <div><div class="mute">Wins</div><div class="big up">${m.trades.wins}</div></div>
 <div><div class="mute">Losses</div><div class="big down">${m.trades.count - m.trades.wins}</div></div></div>
@@ -914,10 +914,10 @@ ${m.lastError ? `<div class="warn">Last error: ${esc(m.lastError)}</div>` : ""}$
 <div class="card"><div class="grid"><div><div class="mute">Equity</div><div class="big">${money(m.equity)}</div></div>
 <div><div class="mute">Return</div><div class="big ${clr(m.returnPct)}">${m.returnPct.toFixed(2)}%</div></div>
 <div><div class="mute">Cash</div>${money(m.cash)}</div><div><div class="mute">Drawdown</div>${m.drawdownPct.toFixed(2)}%</div></div>${sparkline(s.curve)}</div>
-<div class="card"><h2>OPEN POSITIONS (${m.openPositions.length}/${cfg.MAX_POSITIONS})</h2><div class="scroll"><table><tr><th>Coin</th><th>Side</th><th>Entry</th><th>Now</th><th>P&amp;L</th></tr>${rows}</table></div></div>
+<div class="card"><h2>OPEN POSITIONS (${m.openPositions.length}/${cfg.MAX_POSITIONS})</h2><div class="scroll"><table><tr><th>Coin</th><th>Side</th><th>Entry</th><th>Now</th><th>P&amp;L</th></tr>{rows}</table></div></div>
 <div class="card"><h2>CLOSED TRADES · ${m.trades.count} total${m.trades.winRate != null ? ` · ${(m.trades.winRate * 100).toFixed(0)}% win · PF ${m.trades.profitFactor ? m.trades.profitFactor.toFixed(2) : "∞"} · avg ${m.trades.avgPct.toFixed(2)}%` : ""}</h2>
 <div class="mute" style="margin-bottom:6px">Longs: ${m.trades.long.count} trades, ${money(m.trades.long.pnl)} · Shorts (simulated): ${m.trades.short.count} trades, ${money(m.trades.short.pnl)}</div>
-<div class="scroll"><table><tr><th>Coin</th><th>Side</th><th>P&amp;L</th><th>Exit</th></tr>${trades}</table></div></div>
+<div class="scroll"><table><tr><th>Coin</th><th>Side</th><th>P&amp;L</th><th>Exit</th></tr>{trades}</table></div></div>
 <div class="card"><h2>RECENT EVENTS</h2><ul>${events || '<li class="mute">Nothing yet</li>'}</ul></div>
 <div class="mute" style="font-size:12px">${esc(m.universe.note)}. Shorts are simulated. Educational only, not financial advice.</div></div></body></html>`;
 }
