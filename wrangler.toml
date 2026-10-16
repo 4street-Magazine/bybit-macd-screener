@@ -28,6 +28,7 @@ LEV_OTHER = "10"          # all other coins
 FOLLOWERS = "BTC,ETH,SOL,XRP,DOGE,ADA,AVAX,LINK,DOT,LTC,BCH,SHIB,PEPE,BONK,WIF,FLOKI,NEAR,APT,ARB,OP,SUI,INJ,ATOM,UNI,AAVE,FIL,ETC,HBAR,ICP,TIA,SEI,RENDER,FET,TON"   # always 30x
 BTC_CORR = "0.6"          # follower = return correlation with BTC of 0.6 or more
 CORR_BARS = "100"         # candles used for the correlation
+FOLLOWERS_ONLY = "1"      # 1 = scan and trade only BTC followers
 
 TPSL_MODE = "size"        # "size" = % of position size, "atr" = volatility-scaled
 TP_USDT = "0.04"          # NET profit (USDT) at which the retracing stop switches on. 0 = old fixed-TP mode
