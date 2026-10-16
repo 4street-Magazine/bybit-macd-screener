@@ -20,8 +20,8 @@ SCREEN_BATCH = "35"       # coins scanned per run
 SIM_CHECK_BATCH = "10"    # open positions re-checked per run
 MAX_SYMBOLS = "60"        # coins watched
 MAX_POSITIONS = "22"      # open positions at once
-POSITION_SIZE = "10"      # every position = 10 USDT size (margin 1 USDT at 10x, 0.5 at 20x)
-SIM_MARGIN = "1"          # start funds = 1 x 22 = 22 USDT
+POSITION_MARGIN = "1"     # every position = 1 USDT margin; size = 1 x leverage (10x = 10 USDT, 30x = 30 USDT)
+SIM_MARGIN = "1.1"          # start funds = 1.1 x 22 = 24.2 USDT (a little extra for fees)
 
 LEV_FOLLOW = "30"         # coins that follow BTC
 LEV_OTHER = "10"          # all other coins
