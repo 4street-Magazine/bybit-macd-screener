@@ -212,7 +212,7 @@ function newState(cfg) {
     closed: [], events: [], curve: [], mark: {}, equity: cfg.START_CASH,
     stats: { n: 0, wins: 0, gw: 0, gl: 0, sumPct: 0, longN: 0, longPnl: 0, shortN: 0, shortPnl: 0 },
     universe: [], universeAt: 0, universeSource: "", universeNote: "", zone: {},
-    screen: {}, screenBar: {}, btc: null,
+    screen: {}, screenBar: {}, btc: null, corr: {},
     startedAt: nowSec(), lastTick: 0, lastError: null,
   };
 }
@@ -437,6 +437,7 @@ async function screenScan(cfg, s, volumes, now, lastClosedOpen) {
     const kl = klines[sym];
     if (!kl) continue;
     const ind = compute(kl, cfg), last = ind.t.length - 1;
+    s.corr[sym] = btcCorr(kl, s.btc && s.btc.c, cfg.CORR_BARS);   // BTC correlation for every scanned coin
     s.screenBar[sym] = last >= 0 ? ind.t[last] : lastClosedOpen;
     delete s.screen[sym];
     for (let k = 0; k < MAX_CROSS_AGE && last - k >= 1; k++) {
@@ -445,7 +446,7 @@ async function screenScan(cfg, s, volumes, now, lastClosedOpen) {
       const rt = rate(side, ind, last, last - k);
       s.screen[sym] = { side, age: k + 1, crossT: ind.t[last - k], barT: ind.t[last], price: ind.c[last],
         hist: ind.hist[last], strength: Math.abs(ind.hist[last - k]) / ind.c[last - k], vol: volumes[sym] ?? 0,
-        atr: atrPct(ind.h, ind.l, ind.c), corr: btcCorr(kl, s.btc && s.btc.c, cfg.CORR_BARS), ...rt };
+        atr: atrPct(ind.h, ind.l, ind.c), corr: s.corr[sym], ...rt };
       break;
     }
   }
@@ -787,6 +788,24 @@ function screenTables(d, cfg) {
 <div class="card"><h2 class="down">SHORT · MACD crossed DOWN (${d.short.length})</h2>${tbl(d.short, "down")}</div>`;
 }
 
+/** Every watched coin with its BTC correlation and the leverage it will get. */
+function followerData(s, cfg) {
+  const rows = s.universe.map((sym) => {
+    const corr = s.corr && s.corr[sym] != null ? s.corr[sym] : null;
+    return { sym, corr, follower: corr != null && corr >= cfg.BTC_CORR, leverage: corr != null && corr >= cfg.BTC_CORR ? cfg.LEV_FOLLOW : cfg.LEV_OTHER };
+  }).sort((a, b) => (b.corr ?? -2) - (a.corr ?? -2));
+  return { threshold: cfg.BTC_CORR, followers: rows.filter((r) => r.follower).length, total: rows.length, coins: rows };
+}
+
+function followersCard(s, cfg) {
+  const d = followerData(s, cfg);
+  const rows = d.coins.map((r) => `<tr><td><b>${esc(r.sym.replace("USDT", ""))}</b></td><td>${r.corr == null ? "-" : r.corr.toFixed(2)}</td>
+    <td class="${r.follower ? "up" : ""}">${r.corr == null ? "not scanned yet" : r.follower ? "BTC follower" : "other"}</td><td>${r.corr == null ? "-" : r.leverage + "x"}</td></tr>`).join("");
+  return `<div class="card"><h2>BTC FOLLOWERS · ${d.followers} of ${d.total} (correlation ≥ ${d.threshold})</h2>
+<div class="mute small" style="margin-bottom:8px">Correlation of ${cfg.GRANULARITY / 60}m returns with BTC over the last ${cfg.CORR_BARS} candles. 1.00 = moves exactly with BTC, 0 = unrelated. Change BTC_CORR to move the line.</div>
+<div class="scroll"><table><tr><th>Coin</th><th>BTC corr</th><th>Type</th><th>Leverage</th></tr>${rows}</table></div></div>`;
+}
+
 function screenPage(s, cfg, age) {
   const d = screenData(s, cfg, age);
   const tabs = [1, 2, 3].map((n) => `<a href="?age=${n}" class="${n === age ? "on" : ""}">${n === 1 ? "Last candle" : "≤ " + n + " candles"}</a>`).join("");
@@ -818,8 +837,8 @@ function simPage(s, cfg, tab = "sim", age = 1) {
 <h1>MACD Screener Sim · ${cfg.LEV_OTHER}x / ${cfg.LEV_FOLLOW}x paper trades</h1>
 <div class="mute">Fake money · ${cfg.GRANULARITY / 60}m candles · ${cfg.MIN_SCORE > 0 ? `enters ${cfg.MIN_SCORE}+/8 crosses` : "trades every cross on the last candle"} · ${cfg.LEV_FOLLOW}x for BTC followers (corr ≥ ${cfg.BTC_CORR}), else ${cfg.LEV_OTHER}x · ${cfg.TPSL_MODE === "size" ? `TP ${(cfg.TP_SIZE_PCT * 100).toFixed(1)}% / SL ${(cfg.SL_SIZE_PCT * 100).toFixed(1)}% of position size` : `stop ${cfg.SL_ATR}×ATR, target ${cfg.RR_MIN}-${cfg.RR_MAX}R by rating`}${cfg.TRAIL ? ", trailing" : ""} · updated ${ago(s.lastTick)}</div>
 ${m.lastError ? `<div class="warn">Last error: ${esc(m.lastError)}</div>` : ""}
-<div class="card tabs"><a href="?tab=sim" class="${tab === "sim" ? "on" : ""}">Sim trades (${m.openPositions.length} open)</a><a href="?tab=coins" class="${tab === "coins" ? "on" : ""}">Coins (${scr.long.length + scr.short.length} crossed)</a></div>
-${tab === "coins" ? `<div class="card tabs"><div class="mute small" style="margin-bottom:8px">Scanned ${scr.scanned}/${scr.total} coins for the ${hhmm(scr.latestCandleOpen + cfg.GRANULARITY)} EAT candle close. Coins that crossed on the last closed candle get a trade; the others are shown for reference.</div>${[1, 2, 3].map((n) => `<a href="?tab=coins&age=${n}" class="${n === age ? "on" : ""}">${n === 1 ? "Last candle" : "≤ " + n + " candles"}</a>`).join("")}</div>
+<div class="card tabs"><a href="?tab=sim" class="${tab === "sim" ? "on" : ""}">Sim trades (${m.openPositions.length} open)</a><a href="?tab=coins" class="${tab === "coins" ? "on" : ""}">Coins (${scr.long.length + scr.short.length} crossed)</a><a href="?tab=btc" class="${tab === "btc" ? "on" : ""}">BTC list</a></div>
+${tab === "btc" ? followersCard(s, cfg) : tab === "coins" ? `<div class="card tabs"><div class="mute small" style="margin-bottom:8px">Scanned ${scr.scanned}/${scr.total} coins for the ${hhmm(scr.latestCandleOpen + cfg.GRANULARITY)} EAT candle close. Coins that crossed on the last closed candle get a trade; the others are shown for reference.</div>${[1, 2, 3].map((n) => `<a href="?tab=coins&age=${n}" class="${n === age ? "on" : ""}">${n === 1 ? "Last candle" : "≤ " + n + " candles"}</a>`).join("")}</div>
 ${screenTables(scr, cfg)}` : `<div class="card"><div class="grid">
 <div><div class="mute">Total P&amp;L (real, after fees)</div><div class="big ${clr(m.totalPnlUsdt)}">${usdt(m.totalPnlUsdt, 4)}</div></div>
 <div><div class="mute">Equity (started ${usdtPlain(m.start)})</div><div class="big">${usdtPlain(m.equity, 4)}</div></div>
@@ -883,6 +902,7 @@ export default {
 
     const s = await loadState(env, cfg);
     const age = Math.min(MAX_CROSS_AGE, Math.max(1, parseInt(url.searchParams.get("age") || "1", 10) || 1));
+    if (url.pathname === "/api/followers") return json(followerData(s, cfg));
     if (cfg.MODE === "sim") {
       if (url.pathname === "/api/screen") return json(screenData(s, cfg, age));
       if (url.pathname === "/api/status") return json(simSummary(s, cfg));
@@ -893,7 +913,7 @@ export default {
     if (url.pathname === "/api/trades") return json(s.closed);
     if (url.pathname === "/api/universe") return json({ source: s.universeSource, note: s.universeNote, symbols: s.universe });
     const html = cfg.MODE === "trade" ? page(s, cfg)
-      : cfg.MODE === "sim" ? simPage(s, cfg, url.searchParams.get("tab") === "coins" || url.searchParams.get("view") === "screen" ? "coins" : "sim", age)
+      : cfg.MODE === "sim" ? simPage(s, cfg, url.searchParams.get("tab") === "btc" ? "btc" : url.searchParams.get("tab") === "coins" || url.searchParams.get("view") === "screen" ? "coins" : "sim", age)
       : screenPage(s, cfg, age);
     return new Response(html, { headers: { "content-type": "text/html;charset=utf-8" } });
   },
