@@ -1,8 +1,8 @@
-name = "bybit-macd-screener"
+name = "okx-macd-screener"
 main = "src/index.js"
 compatibility_date = "2025-01-01"
 
-# Runs every 2 minutes
+# Every 2 minutes (keeps KV writes under the free-plan daily limit)
 [triggers]
 crons = ["*/2 * * * *"]
 
@@ -11,26 +11,25 @@ binding = "BOT_KV"
 id = "93a9f4b9f8b64f94b6e665f4a5015cf1"
 
 [vars]
-# "auto" = scan the most-traded OKX USDT pairs.
 UNIVERSE_MODE = "auto"
 SYMBOLS = ""
-# Coins scanned per run (kept small to avoid OKX rate limits)
-SCREEN_BATCH = "15"
 
-# Leveraged paper-trading simulation driven by screener signals
 MODE = "sim"
-LEVERAGE = "8"
-SIM_MARGIN = "1"          # USDT margin per position at the start (8 USDT size at 8x)
-TP_MARGIN_PCT = "0.16"    # take profit = 16% of margin (2% price move)
-SL_MARGIN_PCT = "0.053"   # stop loss = 5.3% of margin (0.66% price move)
-TRAIL = "1"               # 1 = trailing stop on, 0 = fixed stop only
-TRAIL_START_PCT = "0.08"  # trailing starts after 8% of margin profit (1% price move)
-TRAIL_DIST_PCT = "0.06"   # then follows 6% of margin (0.75% price) behind the best price
-MIN_SCORE = "0"           # 0 = trade every coin that crossed on the last candle; 5 = STRONG only, 7 = VERY STRONG only
-MAX_POSITIONS = "60"      # slots = 60 x 1 USDT = 60 USDT total funds; profits are split evenly across them
-MAX_SYMBOLS = "60"        # coins scanned
+GRANULARITY = "300"       # 5m candles
+SCREEN_BATCH = "35"       # coins scanned per run
+SIM_CHECK_BATCH = "10"    # open positions re-checked per run
+MAX_SYMBOLS = "60"        # coins watched
+MAX_POSITIONS = "22"      # open positions at once
+SIM_MARGIN = "2.72"       # margin per position (USDT); start funds = 2.72 x 22 = 59.84 USDT
 
-# Optional overrides:
-# MODE = "screen"              # "screen" = screener only (default), "sim" = leveraged paper sim, "trade" = old MACD paper bot
-# GRANULARITY = "900"          # 900 = 15m. Also: 3600 (1h), 14400 (4h)
-# MIN_QUOTE_VOLUME = "1000000" # skip coins with under $1M 24h volume
+LEV_LOW = "10"            # market cap under the threshold (or unknown)
+LEV_HIGH = "20"           # market cap at/above the threshold
+CAP_THRESHOLD = "100000000"
+
+SL_ATR = "1.5"            # stop = 1.5 x ATR
+RR_MIN = "1.5"            # reward:risk at rating 0
+RR_MAX = "3"              # reward:risk at rating 8
+MIN_SL_PCT = "0.0035"
+MAX_SL_MARGIN = "0.30"
+TRAIL = "1"
+MIN_SCORE = "5"           # 5 = STRONG only, 0 = every cross
