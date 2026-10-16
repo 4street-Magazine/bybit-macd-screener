@@ -45,6 +45,7 @@ const DEFAULTS = {
   LEV_OTHER: 10,              // leverage for everything else
   FOLLOWERS: "",              // comma list of coins always treated as BTC followers, e.g. "DOGE,PEPE,SHIB"
   FOLLOWERS_ONLY: 1,          // 1 = scan and trade only BTC followers
+  RESET_ID: "",               // change this value (e.g. "2", "3") and redeploy to wipe the paper account and start afresh
   BTC_CORR: 0.6,              // a coin "follows BTC" when its return correlation with BTC is at least this
   CORR_BARS: 100,             // candles used for the correlation
   POSITION_MARGIN: 1,         // every position uses this much margin (USDT); size = margin x leverage. 0 = compounding margin
@@ -115,6 +116,13 @@ function rsi14(c, n = 14) {
     l = (l * (n - 1) + Math.max(-d, 0)) / n;
   }
   return l === 0 ? 100 : 100 - 100 / (1 + g / l);
+}
+
+/** Williams %R over the last n candles: 0 = at the high (overbought), -100 = at the low (oversold). */
+function wr14(h, l, c, n = 14) {
+  if (c.length < n) return null;
+  const hh = Math.max(...h.slice(-n)), ll = Math.min(...l.slice(-n));
+  return hh === ll ? null : ((hh - c[c.length - 1]) / (hh - ll)) * -100;
 }
 
 function adx14(h, l, c, n = 14) {
@@ -217,7 +225,7 @@ function newState(cfg) {
     stats: { n: 0, wins: 0, gw: 0, gl: 0, sumPct: 0, longN: 0, longPnl: 0, shortN: 0, shortPnl: 0 },
     universe: [], universeAt: 0, universeSource: "", universeNote: "", zone: {},
     screen: {}, screenBar: {}, btc: null, corr: {},
-    startedAt: nowSec(), lastTick: 0, lastError: null,
+    startedAt: nowSec(), lastTick: 0, lastError: null, resetId: String(cfg.RESET_ID ?? ""),
   };
 }
 
@@ -456,7 +464,7 @@ async function screenScan(cfg, s, volumes, now, lastClosedOpen) {
       const rt = rate(side, ind, last, last - k);
       s.screen[sym] = { side, age: k + 1, crossT: ind.t[last - k], barT: ind.t[last], price: ind.c[last],
         hist: ind.hist[last], strength: Math.abs(ind.hist[last - k]) / ind.c[last - k], vol: volumes[sym] ?? 0,
-        atr: atrPct(ind.h, ind.l, ind.c), corr: s.corr[sym], ...rt };
+        atr: atrPct(ind.h, ind.l, ind.c), wr: wr14(ind.h, ind.l, ind.c), corr: s.corr[sym], ...rt };
       break;
     }
   }
@@ -538,7 +546,7 @@ function simOpen(cfg, sim, sym, side, price, t, rt, lev) {
   sim.pos[sym] = {
     side, qty, entry: fill, best: fill, margin, fee, t, lev, btc: isFollower(cfg, rt, sym), corr: rt.corr ?? null,
     chk: Math.floor(t / cfg.GRANULARITY) * cfg.GRANULARITY,
-    label: rt.label, score: rt.score, adx: rt.adx, rsi: rt.rsi,
+    label: rt.label, score: rt.score, adx: rt.adx, rsi: rt.rsi, wr: rt.wr ?? null,
     tp: fill * (1 + side * tpMove), sl: fill * (1 - side * slMove),
     ts: trailStart, td: slMove, rr, trailing: false,
   };
@@ -558,7 +566,7 @@ function simClose(cfg, sim, sym, fill, t, reason) {
   const exitFee = p.qty * fill * rate;
   sim.cash += Math.max(0, p.margin + gross - exitFee);
   const pnl = gross - exitFee - p.fee;
-  sim.closed.push({ sym, side: p.side, tIn: p.t, tOut: t, entry: p.entry, exit: fill, margin: p.margin, lev: p.lev, btc: p.btc, pnl, reason, label: p.label, score: p.score });
+  sim.closed.push({ sym, side: p.side, tIn: p.t, tOut: t, entry: p.entry, exit: fill, margin: p.margin, lev: p.lev, btc: p.btc, pnl, reason, label: p.label, score: p.score, rsi: p.rsi ?? null, wr: p.wr ?? null });
   if (sim.closed.length > 300) sim.closed.shift();
   const st = sim.stats;
   st.n++;
@@ -664,7 +672,10 @@ function simSummary(s, cfg) {
 // =============================== TICK ===============================
 async function loadState(env, cfg) {
   const saved = await env.BOT_KV.get("state", "json");
-  return saved ? { ...newState(cfg), ...saved } : newState(cfg);
+  const fresh = newState(cfg);
+  // RESET_ID changed since the saved state was written: drop all open positions and history, start afresh
+  if (saved && String(saved.resetId ?? "") !== String(cfg.RESET_ID ?? "")) return fresh;
+  return saved ? { ...fresh, ...saved } : fresh;
 }
 
 async function tick(env) {
@@ -803,12 +814,14 @@ function ratingCell(r) {
 
 function screenTables(d, cfg) {
   const ageTxt = (r) => (r.age === 1 ? "last candle" : `${r.age} candles ago`);
-  const tbl = (rows, cls) => `<div class="scroll"><table><tr><th>Coin</th><th>Crossed</th><th>Rating</th><th>Price</th><th>24h vol</th></tr>${
+  const tbl = (rows, cls) => `<div class="scroll"><table><tr><th>Coin</th><th>Crossed</th><th>Rating</th><th>RSI</th><th>%R</th><th>Price</th><th>24h vol</th></tr>${
     rows.map((r) => `<tr><td><b>${esc(r.sym.replace("USDT", ""))}</b>${r.iz ? ' <span class="tag">IZ</span>' : ""}${isFollower(cfg, r, r.sym) ? ` <span class="tag">BTC ${cfg.LEV_FOLLOW}x</span>` : ""}${r.corr != null ? `<br><span class="mute small">BTC corr ${r.corr.toFixed(2)}</span>` : ""}</td>
       <td class="${cls}">${hhmm(r.crossT + cfg.GRANULARITY)} EAT<br><span class="mute">${ageTxt(r)}</span></td>
       <td class="${cls}">${ratingCell(r)}</td>
+      <td>${r.rsi != null ? Math.round(r.rsi) : "-"}</td>
+      <td>${r.wr != null ? Math.round(r.wr) : "-"}</td>
       <td>${num(r.price)}</td><td>${usd(r.vol)}</td></tr>`).join("")
-    || `<tr><td colspan="5" class="mute">No coins match right now</td></tr>`}</table></div>`;
+    || `<tr><td colspan="7" class="mute">No coins match right now</td></tr>`}</table></div>`;
   return `<div class="card"><h2 class="up">LONG · MACD crossed UP (${d.long.length})</h2>${tbl(d.long, "up")}</div>
 <div class="card"><h2 class="down">SHORT · MACD crossed DOWN (${d.short.length})</h2>${tbl(d.short, "down")}</div>`;
 }
@@ -843,7 +856,7 @@ function screenPage(s, cfg, age) {
 ${d.lastError ? `<div class="warn">Last error: ${esc(d.lastError)}</div>` : ""}
 <div class="card tabs">${tabs}<div class="mute" style="margin-top:8px;font-size:13px">Shows coins whose MACD (${cfg.MACD_FAST}/${cfg.MACD_SLOW}/${cfg.MACD_SIGNAL}) crossed its signal line within this many closed candles. Times in EAT. Best-rated first.</div></div>
 ${screenTables(d, cfg)}
-<div class="card small mute"><b>How to read the rating (out of 8).</b> ADX measures trend strength: under 20 choppy, 25+ trending, 40+ strong, 50+ very strong. Points are added when the trend direction agrees with the cross, price is on the right side of the 200-EMA, the MACD line is on the right side of zero, and the cross is sharper than recent candles. A point is removed if RSI is already stretched. VERY STRONG = 7-8, STRONG = 5-6, MODERATE = 3-4, WEAK = 0-2.</div>
+<div class="card small mute"><b>How to read the rating (out of 8).</b> ADX measures trend strength: under 20 choppy, 25+ trending, 40+ strong, 50+ very strong. Points are added when the trend direction agrees with the cross, price is on the right side of the 200-EMA, the MACD line is on the right side of zero, and the cross is sharper than recent candles. A point is removed if RSI is already stretched. VERY STRONG = 7-8, STRONG = 5-6, MODERATE = 3-4, WEAK = 0-2. RSI and %R are read at the latest closed candle. %R runs from 0 (at the 14-candle high) to -100 (at the low); above -20 is overbought, below -80 oversold.</div>
 <div class="mute" style="font-size:12px">${esc(d.note)}. Screener only: no trades are placed. Educational, not financial advice.</div></div></body></html>`;
 }
 
@@ -854,9 +867,6 @@ function simPage(s, cfg, tab = "sim", age = 1) {
     <td>${num(p.entry)}<br><span class="mute small">${tpLabel} ${num(p.tp)} · SL ${num(p.sl)}${p.trailing ? " · trailing" : ""}</span></td><td>${p.price ? num(p.price) : "-"}<br><span class="mute small">${p.pxT ? ago(p.pxT) : ""}</span></td>
     <td class="${clr(p.pnlUsdt)}">${usdt(p.pnlUsdt)}<br><span class="mute small">size ${p.size.toFixed(2)}</span></td><td class="mute small">${esc(p.rating)}</td></tr>`).join("")
     || `<tr><td colspan="6" class="mute">No open positions</td></tr>`;
-  const trades = sim.closed.slice(-15).reverse().map((t) => `<tr><td>${esc(t.sym.replace("USDT", ""))}<br><span class="mute small">${t.lev || ""}${t.lev ? "x" : ""}${t.btc ? " · BTC" : ""}</span></td><td>${t.side > 0 ? "LONG" : "SHORT"}</td>
-    <td class="${clr(t.pnl)}">${usdt(t.pnl)}</td><td class="mute small">${esc(t.reason)}<br>${esc(t.label)} ${t.score}/8 · ${hhmm(t.tOut)} EAT</td></tr>`).join("")
-    || `<tr><td colspan="4" class="mute">No closed trades yet</td></tr>`;
   const events = sim.events.slice(0, 10).map((e) => `<li><b>${esc(e.kind)}</b> ${esc(e.sym.replace("USDT", ""))} <span class="mute">${esc(e.info)}</span></li>`).join("");
   const tpHeader = cfg.TP_USDT > 0
     ? `retracing stop starts at +${cfg.TP_USDT} USDT net, SL ${(cfg.SL_SIZE_PCT * 100).toFixed(1)}% of size`
@@ -879,8 +889,10 @@ ${screenTables(scr, cfg)}` : `<div class="card"><div class="grid">
 <div><div class="mute">Margin in use (${m.openPositions.length} open)</div>${usdtPlain(m.marginInUse, 2)}</div>
 <div><div class="mute">Drawdown from peak</div>${usdtPlain(m.drawdownUsdt, 4)}</div></div>${sparkline(sim.curve)}</div>
 <div class="card"><h2>OPEN POSITIONS (${m.openPositions.length}/${cfg.MAX_POSITIONS})</h2><div class="scroll"><table><tr><th>Coin</th><th>Side</th><th>Entry</th><th>Now</th><th>P&amp;L (net)</th><th>Rating</th></tr>${rows}</table></div></div>
-<div class="card"><h2>CLOSED TRADES · ${m.trades.count} total${m.trades.winRate != null ? ` · ${m.trades.wins} wins (${(m.trades.winRate * 100).toFixed(0)}%) · PF ${m.trades.profitFactor ? m.trades.profitFactor.toFixed(2) : "∞"}` : ""}</h2>
-<div class="scroll"><table><tr><th>Coin</th><th>Side</th><th>P&amp;L</th><th>Exit</th></tr>${trades}</table></div></div>
+<div class="card"><h2>TRADE HISTORY · ${m.trades.count} closed</h2><div class="grid">
+<div><div class="mute">Wins</div><div class="big up">${m.trades.wins}</div></div>
+<div><div class="mute">Losses</div><div class="big down">${m.trades.count - m.trades.wins}</div></div></div>
+<div class="mute small" style="margin-top:8px">${m.trades.winRate != null ? `Win rate ${(m.trades.winRate * 100).toFixed(0)}% · profit factor ${m.trades.profitFactor ? m.trades.profitFactor.toFixed(2) : "∞"}` : "No closed trades yet"}</div></div>
 <div class="card"><h2>RECENT EVENTS</h2><ul>${events || '<li class="mute">Nothing yet</li>'}</ul></div>`}
 <div class="mute" style="font-size:12px">Simulation only. P&amp;L includes entry and exit fees (taker ${(cfg.SIM_FEE * 100).toFixed(2)}%, maker ${(cfg.SIM_FEE_MAKER * 100).toFixed(2)}% on take-profit) and ${(cfg.SIM_SLIP * 100).toFixed(2)}% slippage; no funding. Educational, not financial advice.</div></div></body></html>`;
 }
