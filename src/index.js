@@ -50,7 +50,8 @@ const DEFAULTS = {
   MAX_SL_MARGIN: 0.30,        // stop never risks more than 30% of margin
   RR_MIN: 1.5,                // reward:risk for a rating-0 cross
   RR_MAX: 3,                  // reward:risk for a rating-8 cross
-  TRAIL: 1,                   // 1 = trailing stop on (starts at half the TP distance, follows 1 stop distance behind)
+  TRAIL: 1,                   // 1 = trailing stop on (starts at half the TP distance)
+  TRAIL_GIVEBACK: 0.4,        // once trailing, the stop allows giving back at most 40% of the best profit so far
   SIM_FEE: 0.0005,            // taker fee per side, on notional
   SIM_FEE_MAKER: 0.0002,      // maker fee, used for take-profit exits
   SIM_SLIP: 0.0003,           // slippage per fill
@@ -522,12 +523,13 @@ function simClose(cfg, sim, sym, fill, t, reason) {
   simEvent(sim, "CLOSE " + SIDE(p.side), sym, t, `${reason}, P&L ${pnl >= 0 ? "+" : ""}${pnl.toFixed(4)} USDT`);
 }
 
-/** Trailing stop in price terms: starts at half the TP distance, then follows one stop distance behind the best price. */
+/** Retracing stop: starts at half the TP distance, then locks in (1 - TRAIL_GIVEBACK) of the best profit reached. Never loosens. */
 function simTrail(cfg, p, h, l) {
   if (!cfg.TRAIL || !p.td) return;
   if (p.side > 0) p.best = Math.max(p.best, h); else p.best = Math.min(p.best, l);
-  if (p.side * (p.best / p.entry - 1) < p.ts) return;
-  const sl = p.best * (1 - p.side * p.td);
+  const peak = p.side * (p.best / p.entry - 1);                     // best profit so far, as a price move
+  if (peak < p.ts) return;
+  const sl = p.entry * (1 + p.side * peak * (1 - cfg.TRAIL_GIVEBACK));
   if (p.side > 0 ? sl > p.sl : sl < p.sl) p.sl = sl;
 }
 
