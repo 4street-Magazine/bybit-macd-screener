@@ -1,23 +1,14 @@
 /**
- * Bybit MACD SCREENER (default) + optional paper-trading bot for Cloudflare Workers.
+ * MACD SCREENER (OKX data) + optional paper-trading bot for Cloudflare Workers.
  *
- * MODE "screen" (default): no trading. Every closed 15m candle it scans Bybit Innovation Zone
- *   coins (or all USDT spot pairs, SCREEN_SCOPE="all") and lists those whose MACD just crossed,
- *   split into LONG (crossed up) and SHORT (crossed down) on the dashboard.
- * MODE "trade": the MACD stop-and-reverse paper trader described below.
+ * MODE "screen" (default): no trading. Every closed 15m candle it scans the most-traded
+ *   OKX USDT spot pairs and lists those whose MACD just crossed, split into LONG (crossed up)
+ *   and SHORT (crossed down) on the dashboard.
+ * MODE "trade": the MACD stop-and-reverse PAPER trader (fake money).
  *
- * - Cron trigger every 5 min. State lives in Workers KV.
- * - Universe: Bybit spot USDT pairs flagged as Innovation Zone by Bybit's official public API,
- *   filtered by liquidity, traded several at once.
- * - Signal: MACD ONLY. MACD line crossing above its signal line -> go LONG (closing any short).
- *   Crossing below -> go SHORT (closing any long). Stop-and-reverse on every cross.
- * - Orders fill at the next bar's open with fees + slippage. Signals use CLOSED bars only.
- * - Risk limits (position size, exposure, daily loss, drawdown kill switch) are portfolio
- *   safety rails, not signals. A wide safety stop is on by default (set SAFETY_STOP_PCT=0 to
- *   make the bot exit strictly on MACD crosses).
- *
- * IMPORTANT: Bybit SPOT cannot be shorted. Shorts here are SIMULATED (1x, with a funding/borrow
- * cost estimate). Real shorting needs perpetuals or margin, which many innovation coins lack.
+ * - Cron trigger. State lives in Workers KV.
+ * - Data: OKX public market endpoints, no API key needed.
+ * - Signal: MACD ONLY. Signals use CLOSED bars only.
  *
  * Endpoints: GET /  (dashboard)   GET /api/status   GET /api/trades   GET /api/universe
  *            POST /api/run  POST /api/reset   (both need: Authorization: Bearer <ADMIN_TOKEN>)
@@ -26,36 +17,35 @@
  */
 
 // ============================== CONFIG ==============================
-// Any of these can be overridden in wrangler.toml [vars].
+const OKX_HOST = "https://www.okx.com";
+
 const DEFAULTS = {
   GRANULARITY: 900,           // bar size in seconds: 900 (15m), 3600, 14400, 86400
   MODE: "screen",             // "screen" = dashboard screener only, "trade" = paper trading
-  SCREEN_SCOPE: "innovation", // "innovation" = Innovation Zone coins, "all" = every liquid USDT spot pair
   SCREEN_BATCH: 40,           // coins scanned per run (free plan: max 50 subrequests per run)
   START_CASH: 10000,
-  FEE: 0.001,                 // per side
-  SLIPPAGE: 0.0015,           // per side; small caps are thin
-  SHORT_CARRY_HOURLY: 0.0000125, // simulated funding/borrow cost for shorts (~0.01% per 8h)
+  FEE: 0.001,
+  SLIPPAGE: 0.0015,
+  SHORT_CARRY_HOURLY: 0.0000125,
 
   MACD_FAST: 12, MACD_SLOW: 26, MACD_SIGNAL: 9,
 
-  POSITION_PCT: 0.10,         // each position uses 10% of equity (1x, no leverage)
-  MAX_EXPOSURE: 0.80,         // max 80% of equity in open positions
-  MAX_POSITIONS: 8,           // simultaneous positions (longs + shorts)
-  SAFETY_STOP_PCT: 0.15,      // emergency stop at 15% adverse move; 0 = MACD-only exits
-  DAILY_LOSS_LIMIT: 0.04,     // no new entries after -4% on the day
-  MAX_DRAWDOWN: 0.20,         // kill switch: flatten + pause
+  POSITION_PCT: 0.10,
+  MAX_EXPOSURE: 0.80,
+  MAX_POSITIONS: 8,
+  SAFETY_STOP_PCT: 0.15,
+  DAILY_LOSS_LIMIT: 0.04,
+  MAX_DRAWDOWN: 0.20,
   HALT_DAYS: 5,
 
-  MAX_SYMBOLS: 60,            // coins watched. Screen mode batches the scan; trade mode needs <= 40 on free plan
+  MAX_SYMBOLS: 60,            // coins watched (top by 24h volume)
   MIN_QUOTE_VOLUME: 1000000,  // skip coins trading under $1M/day
   UNIVERSE_REFRESH_H: 6,
   KLINE_LIMIT: 300,
-  DATA_HOST: "https://api.bybit.com", // public endpoints, no key. If blocked, try https://api.bytick.com
 };
 
-const STABLES = new Set(["USDC", "FDUSD", "TUSD", "USDP", "DAI", "USDT", "EUR", "AEUR", "XUSD", "USD1"]);
-const INTERVALS = { 900: "15", 3600: "60", 14400: "240", 86400: "D" };   // Bybit interval codes
+const STABLES = new Set(["USDC", "FDUSD", "TUSD", "USDP", "DAI", "USDT", "EUR", "AEUR", "XUSD", "USD1", "PYUSD"]);
+const INTERVALS = { 900: "15m", 3600: "1H", 14400: "4H", 86400: "1D" };   // OKX bar codes
 
 function getCfg(env) {
   const c = { ...DEFAULTS };
@@ -132,7 +122,6 @@ class Engine {
     this.s.events.unshift({ t, kind, sym, price, qty, info });
     if (this.s.events.length > 60) this.s.events.length = 60;
   }
-  // Each position locks `margin` cash (1x). Value = margin + unrealised P&L (never below 0 = liquidated).
   value(k, p) { const px = this.px[k] ?? p.entry; return Math.max(0, p.margin + p.side * (px - p.entry) * p.qty); }
   equity() { return Object.entries(this.s.pos).reduce((e, [k, p]) => e + this.value(k, p), this.s.cash); }
   exposure() { return Object.entries(this.s.pos).reduce((e, [k, p]) => e + p.qty * (this.px[k] ?? p.entry), 0); }
@@ -142,7 +131,7 @@ class Engine {
     const { cfg, s } = this;
     if (s.halted || this.dailyLimitHit() || Object.keys(s.pos).length >= cfg.MAX_POSITIONS) return;
     const eq = this.equity();
-    const fill = price * (1 + side * cfg.SLIPPAGE);                       // buys pay up, shorts sell lower
+    const fill = price * (1 + side * cfg.SLIPPAGE);
     const notional = Math.min(eq * cfg.POSITION_PCT, eq * cfg.MAX_EXPOSURE - this.exposure(), s.cash / (1 + cfg.FEE));
     if (notional < 10) return;
     const qty = notional / fill, fees = notional * cfg.FEE;
@@ -156,7 +145,7 @@ class Engine {
     const { cfg, s } = this;
     const pos = s.pos[sym];
     delete s.pos[sym];
-    const fill = price * (1 - pos.side * cfg.SLIPPAGE);                   // closing a long sells lower, a short buys higher
+    const fill = price * (1 - pos.side * cfg.SLIPPAGE);
     const gross = pos.side * (fill - pos.entry) * pos.qty;
     const exitFee = pos.qty * fill * cfg.FEE;
     const carry = pos.side < 0 ? pos.margin * cfg.SHORT_CARRY_HOURLY * ((t - pos.t) / 3600) : 0;
@@ -172,7 +161,6 @@ class Engine {
     this.emit("CLOSE " + SIDE(pos.side), sym, t, fill, pos.qty, `${reason}, P&L $${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}`);
   }
 
-  /** Processes one CLOSED bar. Returns a new-entry candidate for a flat symbol (or null). */
   processBar(sym, ind, i) {
     const { cfg, s } = this;
     const t = ind.t[i], o = ind.o[i], h = ind.h[i], l = ind.l[i], c = ind.c[i];
@@ -180,7 +168,6 @@ class Engine {
     const day = Math.floor(t / 86400);
     if (s.day !== day) { s.day = day; s.dayStartEq = this.equity(); }
 
-    // 1) fill orders decided on the previous bar at this bar's open
     const order = s.pending[sym];
     delete s.pending[sym];
     if (order === "close") { if (s.pos[sym]) this._close(sym, o, t, "kill switch"); }
@@ -190,14 +177,12 @@ class Engine {
       else if (!p) this._open(sym, o, t, order.side);
     }
 
-    // 2) emergency stop inside this bar (checked before anything else: conservative)
     const pos = s.pos[sym];
     if (pos && pos.stop) {
       if (pos.side > 0 && l <= pos.stop) this._close(sym, Math.min(o, pos.stop), t, "safety stop");
       else if (pos.side < 0 && h >= pos.stop) this._close(sym, Math.max(o, pos.stop), t, "safety stop");
     }
 
-    // 3) mark to market, portfolio risk checks
     this.px[sym] = c;
     const eq = this.equity();
     s.peak = Math.max(s.peak, eq);
@@ -210,16 +195,14 @@ class Engine {
     }
     if (s.halted) return null;
 
-    // 4) the only signal: a MACD cross on this closed bar
     const side = macdCross(ind, i);
     if (!side) return null;
     const p = s.pos[sym];
-    if (p) { if (p.side !== side) s.pending[sym] = { side, t }; return null; }   // reverse: close + open at next open
+    if (p) { if (p.side !== side) s.pending[sym] = { side, t }; return null; }
     if (this.dailyLimitHit()) return null;
-    return { sym, t, side, score: Math.abs(ind.hist[i]) / c };                  // histogram strength, scaled by price
+    return { sym, t, side, score: Math.abs(ind.hist[i]) / c };
   }
 
-  /** Fills free position slots with the strongest crosses first. */
   assignEntries(cands) {
     const { cfg, s } = this;
     if (s.halted) return;
@@ -235,61 +218,53 @@ class Engine {
   }
 }
 
-// ============================== DATA ================================
-async function bybit(cfg, path, params) {
-  const r = await fetch(`${cfg.DATA_HOST}${path}?${new URLSearchParams(params)}`, { headers: { Accept: "application/json" } });
+// ============================== DATA (OKX) ==========================
+// Internally coins are named like "BTCUSDT"; OKX calls them "BTC-USDT".
+const toInst = (sym) => sym.replace(/USDT$/, "-USDT");
+
+async function okx(path, params) {
+  const r = await fetch(`${OKX_HOST}${path}?${new URLSearchParams(params)}`, { headers: { Accept: "application/json" } });
   if (!r.ok) throw new Error(`HTTP ${r.status} ${path}`);
   const j = await r.json();
-  if (j.retCode !== 0) throw new Error(`Bybit ${j.retCode}: ${j.retMsg}`);
-  return j.result;
+  if (j.code !== "0") throw new Error(`OKX ${j.code}: ${j.msg}`);
+  return j.data;
 }
 
 /** One call returns the live price and 24h USDT turnover of every spot pair. */
 async function fetchTickers(cfg) {
-  const res = await bybit(cfg, "/v5/market/tickers", { category: "spot" });
+  const list = await okx("/api/v5/market/tickers", { instType: "SPOT" });
   const prices = {}, volumes = {};
-  for (const t of res.list) {
-    if (!t.symbol.endsWith("USDT")) continue;
-    prices[t.symbol] = Number(t.lastPrice);
-    volumes[t.symbol] = Number(t.turnover24h);
+  for (const t of list) {
+    if (!t.instId.endsWith("-USDT")) continue;
+    const sym = t.instId.replace("-", "");
+    prices[sym] = Number(t.last);
+    volumes[sym] = Number(t.volCcy24h);     // 24h volume in quote currency (USDT)
   }
   return { prices, volumes };
 }
 
 async function fetchKlines(cfg, sym, now) {
-  const iv = INTERVALS[cfg.GRANULARITY];
-  if (!iv) throw new Error("Unsupported GRANULARITY");
-  const res = await bybit(cfg, "/v5/market/kline", { category: "spot", symbol: sym, interval: iv, limit: String(cfg.KLINE_LIMIT) });
-  return res.list                                                              // newest first: [start ms, open, high, low, close, vol, turnover]
+  const bar = INTERVALS[cfg.GRANULARITY];
+  if (!bar) throw new Error("Unsupported GRANULARITY");
+  const list = await okx("/api/v5/market/candles", { instId: toInst(sym), bar, limit: String(Math.min(300, cfg.KLINE_LIMIT)) });
+  return list                                                                  // newest first: [ts ms, open, high, low, close, vol, ...]
     .map((k) => [Math.floor(+k[0] / 1000), +k[3], +k[2], +k[1], +k[4], +k[5]]) // -> [t, low, high, open, close, vol]
     .sort((a, b) => a[0] - b[0])
     .filter((c) => c[0] + cfg.GRANULARITY <= now);                             // closed bars only
 }
 
-/** Innovation Zone flag comes straight from Bybit's official instruments-info endpoint. */
-async function discoverInnovation(cfg) {
-  const res = await bybit(cfg, "/v5/market/instruments-info", { category: "spot" });
-  const trading = res.list.filter((p) => p.status === "Trading" && p.quoteCoin === "USDT");
-  const isIz = (p) => p.symbolType === "innovation" || p.innovation === "1";
-  return {
-    innovation: trading.filter(isIz).map((p) => p.symbol),
-    all: trading.map((p) => p.symbol),
-    types: [...new Set(res.list.map((p) => p.symbolType).filter(Boolean))],
-  };
+async function discoverPairs() {
+  const list = await okx("/api/v5/public/instruments", { instType: "SPOT" });
+  return list.filter((p) => p.state === "live" && p.quoteCcy === "USDT").map((p) => p.instId.replace("-", ""));
 }
 
 async function refreshUniverse(env, cfg, s, now, volumes) {
-  let list = [], source = "", note = "", zone = new Set();
+  let list = [], source = "", note = "";
   if ((env.UNIVERSE_MODE || "auto") === "auto") {
     try {
-      const d = await discoverInnovation(cfg);
-      zone = new Set(d.innovation);
-      if (cfg.SCREEN_SCOPE === "all") { list = d.all; source = "all USDT spot pairs"; }
-      else {
-        list = d.innovation; source = "auto (Bybit Innovation Zone)";
-        if (!list.length) note = `auto-discovery found 0 innovation pairs (symbolTypes seen: ${d.types.join(", ") || "none"})`;
-      }
-    } catch (e) { note = "auto-discovery failed: " + e.message; }
+      list = await discoverPairs();
+      source = "OKX top USDT pairs by volume";
+    } catch (e) { note = "pair discovery failed: " + e.message; }
   }
   if (!list.length && env.SYMBOLS) {
     list = env.SYMBOLS.split(",").map((x) => x.trim().toUpperCase()).filter(Boolean)
@@ -304,7 +279,7 @@ async function refreshUniverse(env, cfg, s, now, volumes) {
   s.universe = list;
   s.universeAt = now;
   s.universeSource = source || "none";
-  s.zone = Object.fromEntries(list.filter((x) => zone.has(x)).map((x) => [x, 1]));
+  s.zone = {};
   for (const k of Object.keys(s.screen)) if (!list.includes(k)) delete s.screen[k];
   s.universeNote = (note ? note + ". " : "") + `${found} candidates, ${list.length} pass liquidity filter`;
 }
@@ -318,15 +293,14 @@ async function mapLimit(items, limit, fn) {
 }
 
 // ============================= SCREENER =============================
-const MAX_CROSS_AGE = 5;   // remember crosses up to 5 closed candles old; the dashboard filters by age
+const MAX_CROSS_AGE = 5;
 
-/** Scans up to SCREEN_BATCH coins that haven't been checked for the latest closed candle. */
 async function screenScan(cfg, s, volumes, now, lastClosedOpen) {
   const need = s.universe.filter((sym) => (s.screenBar[sym] || 0) < lastClosedOpen).slice(0, cfg.SCREEN_BATCH);
   const klines = {};
-  await mapLimit(need, 6, async (sym) => {
+  await mapLimit(need, 4, async (sym) => {
     try { klines[sym] = await fetchKlines(cfg, sym, now); }
-    catch (e) { s.lastError = `klines ${sym}: ${e.message}`; }               // retried on the next tick
+    catch (e) { s.lastError = `klines ${sym}: ${e.message}`; }
   });
   for (const sym of need) {
     const kl = klines[sym];
@@ -339,17 +313,16 @@ async function screenScan(cfg, s, volumes, now, lastClosedOpen) {
       if (!side) continue;
       s.screen[sym] = { side, age: k + 1, crossT: ind.t[last - k], barT: ind.t[last], price: ind.c[last],
         hist: ind.hist[last], strength: Math.abs(ind.hist[last - k]) / ind.c[last - k], vol: volumes[sym] ?? 0 };
-      break;                                                                  // most recent cross only
+      break;
     }
   }
 }
 
-/** Dashboard data. `age` = max candles since the cross (1 = it happened on the latest closed candle). */
 function screenData(s, cfg, age, now = nowSec()) {
   const gran = cfg.GRANULARITY, latest = Math.floor(now / gran) * gran - gran;
   const rows = Object.entries(s.screen)
     .filter(([sym]) => s.universe.includes(sym))
-    .map(([sym, r]) => ({ sym, ...r, iz: !!s.zone[sym], age: r.age + Math.round((latest - r.barT) / gran) }))  // stale rows keep ageing
+    .map(([sym, r]) => ({ sym, ...r, iz: !!s.zone[sym], age: r.age + Math.round((latest - r.barT) / gran) }))
     .filter((r) => r.age <= age)
     .sort((a, b) => a.age - b.age || b.vol - a.vol);
   const scanned = s.universe.filter((x) => (s.screenBar[x] || 0) >= latest).length;
@@ -389,18 +362,17 @@ async function tick(env) {
     return screenData(s, cfg, 1, now);
   }
 
-  // Watch the universe plus anything we hold or have queued
   const watch = [...new Set([...s.universe, ...Object.keys(s.pos), ...Object.keys(s.pending)])];
   const need = [];
   for (const sym of watch) {
-    if (s.lastBar[sym] === undefined) s.lastBar[sym] = lastClosedOpen;   // newly seen: start fresh, no replay
-    else if (s.lastBar[sym] < lastClosedOpen) need.push(sym);            // a new bar has closed
+    if (s.lastBar[sym] === undefined) s.lastBar[sym] = lastClosedOpen;
+    else if (s.lastBar[sym] < lastClosedOpen) need.push(sym);
   }
 
   const klines = {};
-  await mapLimit(need, 6, async (sym) => {
+  await mapLimit(need, 4, async (sym) => {
     try { klines[sym] = await fetchKlines(cfg, sym, now); }
-    catch (e) { s.lastError = `klines ${sym}: ${e.message}`; }           // retried on next tick
+    catch (e) { s.lastError = `klines ${sym}: ${e.message}`; }
   });
 
   const cands = [];
@@ -413,12 +385,11 @@ async function tick(env) {
       if (ind.t[i] <= s.lastBar[sym]) continue;
       const cand = eng.processBar(sym, ind, i);
       s.lastBar[sym] = ind.t[i];
-      if (cand && i === last) cands.push(cand);                          // only fresh signals
+      if (cand && i === last) cands.push(cand);
     }
   }
   eng.assignEntries(cands);
 
-  // Live prices: refresh marks, then check stops between bars
   for (const k of Object.keys(s.pos)) if (prices[k]) eng.px[k] = prices[k];
   for (const [sym, p] of Object.entries(s.pos)) {
     const px = prices[sym];
@@ -494,11 +465,11 @@ function screenPage(s, cfg, age) {
   const tabs = [1, 2, 3].map((n) => `<a href="?age=${n}" class="${n === age ? "on" : ""}">${n === 1 ? "Last candle" : "≤ " + n + " candles"}</a>`).join("");
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="60">
-<title>Bybit MACD Screener</title><style>${STYLE}</style></head><body><div class="wrap">
-<h1>Bybit MACD Screener · ${d.timeframe}</h1>
+<title>MACD Screener</title><style>${STYLE}</style></head><body><div class="wrap">
+<h1>MACD Screener (OKX) · ${d.timeframe}</h1>
 <div class="mute">Scanned ${d.scanned}/${d.total} coins for the ${hhmm(d.latestCandleOpen + cfg.GRANULARITY)} UTC candle close · ${esc(d.scope)} · updated ${ago(s.lastTick)}</div>
 ${d.lastError ? `<div class="warn">Last error: ${esc(d.lastError)}</div>` : ""}
-<div class="card tabs">${tabs}<div class="mute" style="margin-top:8px;font-size:13px">Shows coins whose MACD (${cfg.MACD_FAST}/${cfg.MACD_SLOW}/${cfg.MACD_SIGNAL}) crossed its signal line within this many closed candles. IZ = Innovation Zone.</div></div>
+<div class="card tabs">${tabs}<div class="mute" style="margin-top:8px;font-size:13px">Shows coins whose MACD (${cfg.MACD_FAST}/${cfg.MACD_SLOW}/${cfg.MACD_SIGNAL}) crossed its signal line within this many closed candles.</div></div>
 <div class="card"><h2 class="up">LONG · MACD crossed UP (${d.long.length})</h2>${tbl(d.long, "up")}</div>
 <div class="card"><h2 class="down">SHORT · MACD crossed DOWN (${d.short.length})</h2>${tbl(d.short, "down")}</div>
 <div class="mute" style="font-size:12px">${esc(d.note)}. Screener only: no trades are placed. Strength = MACD histogram as % of price on the cross candle. Educational, not financial advice.</div></div></body></html>`;
@@ -516,8 +487,8 @@ function page(s, cfg) {
 
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="60">
-<title>Bybit Innovation MACD Bot</title><style>${STYLE}</style></head><body><div class="wrap">
-<h1>Bybit Innovation MACD Bot</h1><div class="mute">Fake money · updated ${ago(s.lastTick)} · ${esc(m.universe.source)}, ${m.universe.size} coins watched</div>
+<title>MACD Paper Bot</title><style>${STYLE}</style></head><body><div class="wrap">
+<h1>MACD Paper Bot (OKX data)</h1><div class="mute">Fake money · updated ${ago(s.lastTick)} · ${esc(m.universe.source)}, ${m.universe.size} coins watched</div>
 ${m.lastError ? `<div class="warn">Last error: ${esc(m.lastError)}</div>` : ""}${m.halted ? `<div class="warn">Kill switch active: trading paused</div>` : ""}
 <div class="card"><div class="grid"><div><div class="mute">Equity</div><div class="big">${money(m.equity)}</div></div>
 <div><div class="mute">Return</div><div class="big ${clr(m.returnPct)}">${m.returnPct.toFixed(2)}%</div></div>
@@ -527,7 +498,7 @@ ${m.lastError ? `<div class="warn">Last error: ${esc(m.lastError)}</div>` : ""}$
 <div class="mute" style="margin-bottom:6px">Longs: ${m.trades.long.count} trades, ${money(m.trades.long.pnl)} · Shorts (simulated): ${m.trades.short.count} trades, ${money(m.trades.short.pnl)}</div>
 <div class="scroll"><table><tr><th>Coin</th><th>Side</th><th>P&amp;L</th><th>Exit</th></tr>${trades}</table></div></div>
 <div class="card"><h2>RECENT EVENTS</h2><ul>${events || '<li class="mute">Nothing yet</li>'}</ul></div>
-<div class="mute" style="font-size:12px">${esc(m.universe.note)}. Shorts are simulated; Bybit spot cannot be shorted. Educational only, not financial advice.</div></div></body></html>`;
+<div class="mute" style="font-size:12px">${esc(m.universe.note)}. Shorts are simulated. Educational only, not financial advice.</div></div></body></html>`;
 }
 
 // ============================== ROUTES ==============================
