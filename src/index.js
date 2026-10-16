@@ -6,7 +6,7 @@
  *   and SHORT (crossed down). Each cross is rated VERY STRONG / STRONG / MODERATE / WEAK using
  *   ADX (trend strength), the 200-EMA, the MACD zero line, cross sharpness and RSI.
  *   Times are shown in EAT (UTC+3).
- * MODE "sim": leveraged PAPER trades opened from the screener's rated crosses (fake money).
+ * MODE "sim": leveraged PAPER trades opened from the screener's crosses (fake money).
  * MODE "trade": the MACD stop-and-reverse PAPER trader (fake money).
  *
  * - Cron trigger. State lives in Workers KV.
@@ -51,7 +51,7 @@ const DEFAULTS = {
   SIM_MARGIN: 1,              // starting margin per position (USDT); notional = margin x leverage
   TP_MARGIN_PCT: 0.16,        // take profit = 16% of margin  (= 2% price move at 8x)
   SL_MARGIN_PCT: 0.053,       // stop loss   = 5.3% of margin (= 0.66% price move at 8x)
-  MIN_SCORE: 5,               // minimum screener rating (0-8) to enter. 5 = STRONG, 7 = VERY STRONG
+  MIN_SCORE: 0,               // minimum screener rating (0-8) to enter. 0 = trade EVERY cross, 5 = STRONG only, 7 = VERY STRONG only
   TRAIL: 1,                   // 1 = trailing stop on, 0 = fixed stop only
   TRAIL_START_PCT: 0.08,      // trailing begins once the trade has been 8% of margin in profit (1% price move)
   TRAIL_DIST_PCT: 0.06,       // then the stop follows 6% of margin (0.75% price) behind the best price, never loosening
@@ -717,8 +717,8 @@ function ratingCell(r) {
     200-EMA ${r.emaOk ? "✓" : "✗"} · zero-line ${r.zeroOk ? "✓" : "✗"}</span>`;
 }
 
-function screenPage(s, cfg, age) {
-  const d = screenData(s, cfg, age);
+/** The LONG / SHORT cross tables, shared by the screener page and the sim page. */
+function screenTables(d, cfg) {
   const ageTxt = (r) => (r.age === 1 ? "last candle" : `${r.age} candles ago`);
   const tbl = (rows, cls) => `<div class="scroll"><table><tr><th>Coin</th><th>Crossed</th><th>Rating</th><th>Price</th><th>24h vol</th></tr>${
     rows.map((r) => `<tr><td><b>${esc(r.sym.replace("USDT", ""))}</b>${r.iz ? ' <span class="tag">IZ</span>' : ""}</td>
@@ -726,6 +726,12 @@ function screenPage(s, cfg, age) {
       <td class="${cls}">${ratingCell(r)}</td>
       <td>${num(r.price)}</td><td>${usd(r.vol)}</td></tr>`).join("")
     || `<tr><td colspan="5" class="mute">No coins match right now</td></tr>`}</table></div>`;
+  return `<div class="card"><h2 class="up">LONG · MACD crossed UP (${d.long.length})</h2>${tbl(d.long, "up")}</div>
+<div class="card"><h2 class="down">SHORT · MACD crossed DOWN (${d.short.length})</h2>${tbl(d.short, "down")}</div>`;
+}
+
+function screenPage(s, cfg, age) {
+  const d = screenData(s, cfg, age);
   const tabs = [1, 2, 3].map((n) => `<a href="?age=${n}" class="${n === age ? "on" : ""}">${n === 1 ? "Last candle" : "≤ " + n + " candles"}</a>`).join("");
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="60">
@@ -734,14 +740,13 @@ function screenPage(s, cfg, age) {
 <div class="mute">Scanned ${d.scanned}/${d.total} coins for the ${hhmm(d.latestCandleOpen + cfg.GRANULARITY)} EAT candle close · ${esc(d.scope)} · updated ${ago(s.lastTick)}</div>
 ${d.lastError ? `<div class="warn">Last error: ${esc(d.lastError)}</div>` : ""}
 <div class="card tabs">${tabs}<div class="mute" style="margin-top:8px;font-size:13px">Shows coins whose MACD (${cfg.MACD_FAST}/${cfg.MACD_SLOW}/${cfg.MACD_SIGNAL}) crossed its signal line within this many closed candles. Times in EAT. Best-rated first.</div></div>
-<div class="card"><h2 class="up">LONG · MACD crossed UP (${d.long.length})</h2>${tbl(d.long, "up")}</div>
-<div class="card"><h2 class="down">SHORT · MACD crossed DOWN (${d.short.length})</h2>${tbl(d.short, "down")}</div>
+${screenTables(d, cfg)}
 <div class="card small mute"><b>How to read the rating (out of 8).</b> ADX measures how strong the trend is: under 20 choppy, 25+ trending, 40+ strong, 50+ very strong. Points are added when the trend direction agrees with the cross, price is on the right side of the 200-EMA, the MACD line is on the right side of zero, and the cross is sharper than recent candles. A point is removed if RSI is already stretched (LONG above 75, SHORT below 25). VERY STRONG = 7-8, STRONG = 5-6, MODERATE = 3-4, WEAK = 0-2. ✓ means the check passed. This is a guide to trend quality on this timeframe, not a prediction.</div>
 <div class="mute" style="font-size:12px">${esc(d.note)}. Screener only: no trades are placed. Educational, not financial advice.</div></div></body></html>`;
 }
 
-function simPage(s, cfg) {
-  const sim = s.sim || newSim(cfg), m = simSummary(s, cfg);
+function simPage(s, cfg, tab = "sim", age = 1) {
+  const sim = s.sim || newSim(cfg), m = simSummary(s, cfg), scr = screenData(s, cfg, age);
   const f = (n, d = 4) => (n < 0 ? "-" : "") + "$" + Math.abs(n).toFixed(d);
   const rows = m.openPositions.map((p) => `<tr><td><b>${esc(p.sym.replace("USDT", ""))}</b></td><td class="${p.side === "LONG" ? "up" : "down"}">${p.side}</td>
     <td>${num(p.entry)}<br><span class="mute small">TP ${num(p.tp)} · SL ${num(p.sl)}</span></td><td>${p.price ? num(p.price) : "-"}</td>
@@ -755,17 +760,19 @@ function simPage(s, cfg) {
 <meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="60">
 <title>MACD Leverage Sim</title><style>${STYLE}</style></head><body><div class="wrap">
 <h1>MACD Screener Sim · ${cfg.LEVERAGE}x paper trades</h1>
-<div class="mute">Fake money · enters ${cfg.MIN_SCORE}+/8 crosses · TP ${(cfg.TP_MARGIN_PCT * 100).toFixed(1)}% / SL ${(cfg.SL_MARGIN_PCT * 100).toFixed(1)}% of margin${cfg.TRAIL ? `, then trails ${(cfg.TRAIL_DIST_PCT * 100).toFixed(0)}% behind after +${(cfg.TRAIL_START_PCT * 100).toFixed(0)}%` : ""} · updated ${ago(s.lastTick)}</div>
+<div class="mute">Fake money · ${cfg.MIN_SCORE > 0 ? `enters ${cfg.MIN_SCORE}+/8 crosses` : "trades every coin whose MACD crossed on the last candle"} · TP ${(cfg.TP_MARGIN_PCT * 100).toFixed(1)}% / SL ${(cfg.SL_MARGIN_PCT * 100).toFixed(1)}% of margin${cfg.TRAIL ? `, then trails ${(cfg.TRAIL_DIST_PCT * 100).toFixed(0)}% behind after +${(cfg.TRAIL_START_PCT * 100).toFixed(0)}%` : ""} · updated ${ago(s.lastTick)}</div>
 ${m.lastError ? `<div class="warn">Last error: ${esc(m.lastError)}</div>` : ""}
-<div class="card"><div class="grid"><div><div class="mute">Equity (started ${f(m.start, 2)})</div><div class="big">${f(m.equity)}</div></div>
+<div class="card tabs"><a href="?tab=sim" class="${tab === "sim" ? "on" : ""}">Sim trades (${m.openPositions.length} open)</a><a href="?tab=coins" class="${tab === "coins" ? "on" : ""}">Coins (${scr.long.length + scr.short.length} crossed)</a></div>
+${tab === "coins" ? `<div class="card tabs"><div class="mute small" style="margin-bottom:8px">Scanned ${scr.scanned}/${scr.total} coins for the ${hhmm(scr.latestCandleOpen + cfg.GRANULARITY)} EAT candle close. Coins that crossed on the last closed candle get a trade; the others are shown for reference.</div>${[1, 2, 3].map((n) => `<a href="?tab=coins&age=${n}" class="${n === age ? "on" : ""}">${n === 1 ? "Last candle" : "≤ " + n + " candles"}</a>`).join("")}</div>
+${screenTables(scr, cfg)}` : `<div class="card"><div class="grid"><div><div class="mute">Equity (started ${f(m.start, 2)})</div><div class="big">${f(m.equity)}</div></div>
 <div><div class="mute">Return</div><div class="big ${clr(m.returnPct)}">${m.returnPct.toFixed(2)}%</div></div>
 <div><div class="mute">Margin per new position</div>${f(m.marginPerPosition)} <span class="mute">(${f(m.marginPerPosition * cfg.LEVERAGE)} size)</span></div>
 <div><div class="mute">Drawdown</div>${m.drawdownPct.toFixed(2)}%</div></div>${sparkline(sim.curve)}</div>
 <div class="card"><h2>OPEN POSITIONS (${m.openPositions.length}/${cfg.MAX_POSITIONS})</h2><div class="scroll"><table><tr><th>Coin</th><th>Side</th><th>Entry</th><th>Now</th><th>P&amp;L</th><th>Rating</th></tr>${rows}</table></div></div>
 <div class="card"><h2>CLOSED TRADES · ${m.trades.count} total${m.trades.winRate != null ? ` · ${(m.trades.winRate * 100).toFixed(0)}% win · PF ${m.trades.profitFactor ? m.trades.profitFactor.toFixed(2) : "∞"}` : ""}</h2>
 <div class="scroll"><table><tr><th>Coin</th><th>Side</th><th>P&amp;L</th><th>Exit</th></tr>${trades}</table></div></div>
-<div class="card"><h2>RECENT EVENTS</h2><ul>${events || '<li class="mute">Nothing yet</li>'}</ul></div>
-<div class="mute" style="font-size:12px"><a href="?view=screen" style="color:inherit">Open the screener</a> · Simulation only: fees ${(cfg.SIM_FEE * 100).toFixed(2)}%/side, slippage ${(cfg.SIM_SLIP * 100).toFixed(2)}%, no funding. Educational, not financial advice.</div></div></body></html>`;
+<div class="card"><h2>RECENT EVENTS</h2><ul>${events || '<li class="mute">Nothing yet</li>'}</ul></div>`}
+<div class="mute" style="font-size:12px">Simulation only: fees ${(cfg.SIM_FEE * 100).toFixed(2)}%/side, slippage ${(cfg.SIM_SLIP * 100).toFixed(2)}%, no funding. Educational, not financial advice.</div></div></body></html>`;
 }
 
 function page(s, cfg) {
@@ -827,7 +834,7 @@ export default {
     if (url.pathname === "/api/trades") return json(s.closed);
     if (url.pathname === "/api/universe") return json({ source: s.universeSource, note: s.universeNote, symbols: s.universe });
     const html = cfg.MODE === "trade" ? page(s, cfg)
-      : cfg.MODE === "sim" && url.searchParams.get("view") !== "screen" ? simPage(s, cfg)
+      : cfg.MODE === "sim" ? simPage(s, cfg, url.searchParams.get("tab") === "coins" || url.searchParams.get("view") === "screen" ? "coins" : "sim", age)
       : screenPage(s, cfg, age);
     return new Response(html, { headers: { "content-type": "text/html;charset=utf-8" } });
   },
