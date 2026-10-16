@@ -1,0 +1,1 @@
+# bybit-macd-screener
