@@ -2,9 +2,6 @@ name = "bybit-macd-screener"
 main = "src/index.js"
 compatibility_date = "2025-01-01"
 
-[placement]
-region = "aws:ap-southeast-1"
-
 # Runs every 2 minutes
 [triggers]
 crons = ["*/2 * * * *"]
@@ -14,18 +11,15 @@ binding = "BOT_KV"
 id = "93a9f4b9f8b64f94b6e665f4a5015cf1"
 
 [vars]
-# "auto" reads Bybit's official Innovation Zone flag (public API, no key needed).
-# If it finds nothing, the bot uses SYMBOLS below instead.
+# "auto" = scan the most-traded OKX USDT pairs.
+# If discovery fails, the bot uses SYMBOLS below instead.
 UNIVERSE_MODE = "auto"
-# Fallback list, comma separated, e.g. "ABC,XYZ,FOO"
+# Fallback list, comma separated, e.g. "BTC,ETH,SOL"
 SYMBOLS = ""
-# Alternate Bybit data address (api.bybit.com returns 403 from Cloudflare)
-DATA_HOST = "https://api.bytick.com"
 
 # Optional overrides (defaults live at the top of src/index.js):
 # MODE = "screen"              # "screen" = screener only (default), "trade" = MACD paper trading
-# SCREEN_SCOPE = "innovation"  # "all" = scan every liquid USDT spot pair, not just Innovation Zone
-# MAX_SYMBOLS = "60"           # coins watched (raise with SCREEN_SCOPE = "all")
+# MAX_SYMBOLS = "60"           # coins watched
 # SCREEN_BATCH = "40"          # coins scanned per run. Free plan: keep <= 40.
 # GRANULARITY = "900"          # 900 = 15m. Also: 3600 (1h), 14400 (4h)
 # MIN_QUOTE_VOLUME = "1000000" # skip coins with under $1M 24h volume
