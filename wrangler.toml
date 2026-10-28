@@ -1,4 +1,4 @@
-name = "okx-macd-screener"
+name = "bybit-macd-screener"
 main = "src/index.js"
 compatibility_date = "2025-01-01"
 
@@ -35,4 +35,3 @@ RESET_ID = "2"
 OI_FILTER = "1"           # 1 = on, 0 = off
 OI_LOOKBACK = "4"         # candles (4 x 15m = 1 hour)
 OI_MIN_CHANGE = "0.005"   # OI must be up at least +0.5%
-
