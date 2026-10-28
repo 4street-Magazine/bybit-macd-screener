@@ -1,6 +1,7 @@
 /**
  * MACD SCREENER (OKX data) + paper-trading sim for Cloudflare Workers.
  *
+ 
  * MODE "screen": scanner only. MODE "sim": leveraged PAPER trades from screener crosses (fake money).
  * MODE "trade": old MACD stop-and-reverse paper bot.
  *
