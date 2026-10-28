@@ -16,21 +16,22 @@ SYMBOLS = ""
 
 MODE = "sim"
 GRANULARITY = "900"       # 15m candles
-SCREEN_BATCH = "35"       # coins scanned per run
+SCREEN_BATCH = "33"       # coins scanned per run (OI filter uses 1 subrequest)
 SIM_CHECK_BATCH = "10"    # open positions re-checked per run
 MAX_SYMBOLS = "60"        # coins watched
 MAX_POSITIONS = "22"      # open positions at once
-SIM_MARGIN = "2.72"       # margin per position (USDT); start funds = 2.72 x 22 = 59.84 USDT
 
-LEV_LOW = "10"            # market cap under the threshold (or unknown)
-LEV_HIGH = "20"           # market cap at/above the threshold
-CAP_THRESHOLD = "100000000"
+POSITION_MARGIN = "1"     # margin per position (USDT)
+SIM_MARGIN = "1.1"        # start funds = 1.1 x 22 = 24.2 USDT
 
-SL_ATR = "1.5"            # stop = 1.5 x ATR
-RR_MIN = "1.5"            # reward:risk at rating 0
-RR_MAX = "3"              # reward:risk at rating 8
-MIN_SL_PCT = "0.0035"
-MAX_SL_MARGIN = "0.30"
+MIN_SCORE = "5"           # 5 = STRONG only, 0 = every cross
 TRAIL = "1"
 TRAIL_GIVEBACK = "0.4"    # give back at most 40% of the best profit
-MIN_SCORE = "5"           # 5 = STRONG only, 0 = every cross
+
+# Change this value (e.g. "3", "4") and redeploy to wipe the paper account
+RESET_ID = "2"
+
+# Open interest filter
+OI_FILTER = "1"           # 1 = on, 0 = off
+OI_LOOKBACK = "4"         # candles (4 x 15m = 1 hour)
+OI_MIN_CHANGE = "0.005"   # OI must be up at least +0.5%
