@@ -1,1 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Bybit top 100 order flow</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#eaf6ef;--bg2:#f7fcf9;--card:#fff;--line:rgba(8,90,52,.14);--fg:#0a2a1b;--mut:#5b7a69;--track:#d5e8dd;
+  --gr:linear-gradient(135deg,#00b86b,#19e58a 55%,#9dff6a);--rd:linear-gradient(135deg,#ff7a59,#ff3d6e);
+  --g:#0aa869;--r:#e0345f;--am:#e08a00;--glow:rgba(25,229,138,.25);color-scheme:light}
+@media(prefers-color-scheme:dark){:root{--bg:#04100a;--bg2:#08241a;--card:#0b1d14;--line:rgba(52,235,150,.16);--fg:#e9fff3;--mut:#7fa592;--track:#143225;
+  --g:#25f09a;--r:#ff5d84;--am:#ffb627;--glow:rgba(25,240,139,.22);color-scheme:dark}}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;color:var(--fg);font:14px/1.45 "Plus Jakarta Sans",system-ui,-apple-system,"Segoe UI",sans-serif;font-variant-numeric:tabular-nums;
+  background:radial-gradient(900px 500px at 85% -10%,var(--glow),transparent 60%),radial-gradient(700px 500px at -10% 110%,var(--glow),transparent 60%),linear-gradient(180deg,var(--bg2),var(--bg));
+  padding:max(16px,env(safe-area-inset-top)) 16px max(24px,env(safe-area-inset-bottom))}
+.wrap{max-width:1200px;margin:0 auto;display:grid;gap:14px}
+.card{background:linear-gradient(160deg,color-mix(in srgb,var(--card) 92%,#19e58a),var(--card));border:1px solid var(--line);border-radius:16px;padding:18px;box-shadow:0 10px 30px -18px rgba(0,0,0,.45);min-width:0}
+header{display:flex;flex-wrap:wrap;gap:12px 18px;align-items:center}
+.brand{display:flex;gap:11px;align-items:center;margin-right:auto}
+.logo{width:38px;height:38px;border-radius:11px;background:var(--gr);display:grid;place-items:center;box-shadow:0 6px 18px -4px var(--glow)}
+h1{font-size:18px;margin:0;font-weight:800;letter-spacing:-.01em}
+.brand p{margin:0;color:var(--mut);font-size:12px}
+.ctl{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.seg{display:flex;gap:4px;background:var(--track);padding:3px;border-radius:11px}
+.seg button,.back{border:0;background:none;color:var(--mut);font:600 12.5px "Plus Jakarta Sans",system-ui;padding:6px 10px;border-radius:8px;cursor:pointer}
+.seg button.on{background:var(--gr);color:#032015}
+button:focus-visible,input:focus-visible{outline:2px solid var(--g);outline-offset:2px}
+input{width:130px;background:var(--track);color:var(--fg);border:0;border-radius:10px;padding:8px 10px;font:600 12.5px "Plus Jakarta Sans",system-ui}
+.pill{display:flex;align-items:center;gap:7px;padding:7px 12px;border-radius:99px;background:var(--track);font-weight:600;font-size:12.5px}
+.pill i{width:8px;height:8px;border-radius:50%;background:var(--mut)}
+.pill.live i{background:var(--g);animation:p 1.8s infinite}
+@keyframes p{0%{box-shadow:0 0 0 0 var(--g)}70%,100%{box-shadow:0 0 0 7px transparent}}
+@media(prefers-reduced-motion:reduce){.pill.live i{animation:none}}
+.top{display:grid;grid-template-columns:minmax(0,.9fr) minmax(0,1.3fr);gap:14px}
+.gauge{position:relative;max-width:320px;margin:0 auto}
+.gauge svg{width:100%;display:block;overflow:visible}
+.gv{position:absolute;left:0;right:0;bottom:2px;text-align:center}
+#wr{font-size:clamp(38px,8vw,52px);font-weight:800;line-height:1;letter-spacing:-.03em}
+.badge{display:inline-block;margin-top:8px;padding:5px 12px;border-radius:99px;font-weight:700;font-size:13px;background:var(--track)}
+.badge.up{background:var(--gr);color:#032015}.badge.dn{background:var(--rd);color:#2a0710}
+.ends{display:flex;justify-content:space-between;color:var(--mut);font-size:12px;margin:6px 4px 0}
+.bar{position:relative;height:12px;background:var(--track);border-radius:6px;overflow:hidden;margin-top:12px}
+.bar b{position:absolute;top:0;bottom:0;border-radius:6px}
+.bar i{position:absolute;left:50%;top:0;bottom:0;width:2px;background:var(--fg);opacity:.4}
+.stats{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-top:14px}
+.st{border:1px solid var(--line);border-radius:12px;padding:9px 12px}
+.st small{color:var(--mut);font-size:12px}
+.st b{display:block;font-size:18px;font-weight:700;letter-spacing:-.02em}
+.sig{margin-top:10px;border-radius:12px;padding:10px 12px;border:1px solid var(--line);border-left:4px solid var(--mut)}
+.sig strong{display:block}.sig span{color:var(--mut);font-size:13px}
+.ch{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:8px;margin-bottom:10px}
+h2{margin:0;font-size:15px;font-weight:700}
+.back{background:var(--track);display:none}
+.lg{display:flex;gap:12px;color:var(--mut);font-size:12px}
+.lg i{display:inline-block;width:9px;height:9px;border-radius:3px;margin-right:5px}
+canvas{width:100%;height:300px;display:block}
+.breadth{display:flex;height:10px;border-radius:5px;overflow:hidden;background:var(--track);margin:10px 0 14px}
+.breadth i{display:block;transition:width .5s}
+.tools{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between}
+.tw{max-height:640px;overflow:auto;border-radius:10px}
+table{border-collapse:collapse;width:100%;min-width:780px}
+th{position:sticky;top:0;background:var(--card);text-align:right;color:var(--mut);font-weight:600;font-size:12px;padding:8px 10px;border-bottom:1px solid var(--line);z-index:1}
+td{text-align:right;padding:8px 10px;border-bottom:1px solid var(--line);font-weight:500}
+th:first-child,td:first-child{text-align:left}th:nth-child(3),td:nth-child(3){text-align:left}
+tr[data-s]{cursor:pointer}tr[data-s]:hover,tr.sel{background:color-mix(in srgb,var(--track) 60%,transparent)}
+.pr{font-weight:700}.pr small{color:var(--mut);font-weight:500;margin-left:3px}
+.mb{position:relative;width:110px;height:8px;border-radius:4px;background:var(--track);overflow:hidden;display:inline-block;vertical-align:middle;margin-right:8px}
+.mb b{position:absolute;top:0;bottom:0}.mb i{position:absolute;left:50%;width:1px;top:0;bottom:0;background:var(--fg);opacity:.4}
+.up{color:var(--g)}.dn{color:var(--r)}.am{color:var(--am)}.mu{color:var(--mut)}
+@media(max-width:820px){.top{grid-template-columns:1fr}canvas{height:240px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="card">
+    <div class="brand">
+      <div class="logo"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#032015" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12h4l3-8 5 16 3-8h5"/></svg></div>
+      <div><h1>Top 100 order flow</h1><p>Bybit USDT perpetuals by 24h volume: market buys versus market sells</p></div>
+    </div>
+    <div class="ctl">
+      <div class="seg" id="wins"></div>
+      <div class="pill" id="pill"><i></i><span id="status">Loading</span></div>
+    </div>
+  </header>
 
+  <section class="top">
+    <div class="card">
+      <div class="gauge">
+        <svg viewBox="0 0 200 112">
+          <defs>
+            <linearGradient id="gG" gradientUnits="userSpaceOnUse" x1="100" y1="0" x2="180" y2="0"><stop offset="0" stop-color="#00c27a"/><stop offset=".6" stop-color="#19f08b"/><stop offset="1" stop-color="#b8ff6a"/></linearGradient>
+            <linearGradient id="gR" gradientUnits="userSpaceOnUse" x1="100" y1="0" x2="20" y2="0"><stop offset="0" stop-color="#ff8a5c"/><stop offset="1" stop-color="#ff3d6e"/></linearGradient>
+          </defs>
+          <path d="M20 100A80 80 0 0 1 180 100" fill="none" stroke="var(--track)" stroke-width="14" stroke-linecap="round"/>
+          <path id="arc" d="M100 20A80 80 0 0 1 100 20" fill="none" stroke="url(#gG)" stroke-width="14" stroke-linecap="round"/>
+          <circle id="tip" cx="100" cy="20" r="4.5" fill="#fff"/>
+        </svg>
+        <div class="gv"><div id="wr">0.0%</div><span class="badge" id="badge">No data</span></div>
+      </div>
+      <div class="ends"><span>Short −100%</span><span>Tug of war at 0</span><span>Long +100%</span></div>
+      <div class="bar"><b id="fill"></b><i></i></div>
+      <div class="stats">
+        <div class="st"><small>Buy rate per second</small><b id="b">0</b></div>
+        <div class="st"><small>Sell rate per second</small><b id="s">0</b></div>
+        <div class="st"><small>Net rate per second</small><b id="n">0</b></div>
+        <div class="st"><small id="x1l">Price move</small><b id="x1">0</b></div>
+      </div>
+      <div class="sig" id="sig"><strong>Loading pairs</strong><span>Fetching the top 100 by 24h volume.</span></div>
+    </div>
+    <div class="card">
+      <div class="ch">
+        <h2 id="ct">Market, all pairs</h2>
+        <button class="back" id="back">Back to market</button>
+        <div class="lg"><span><i style="background:#19e58a"></i>Buyers</span><span><i style="background:#ff4d73"></i>Sellers</span><span><i style="background:var(--am)"></i>Absorbed</span></div>
+      </div>
+      <canvas id="cv"></canvas>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="tools">
+      <h2>Scanner</h2>
+      <div class="ctl">
+        <input id="q" placeholder="Search pair" spellcheck="false" autocapitalize="characters">
+        <div class="seg" id="flt"></div>
+        <div class="seg" id="srt"></div>
+      </div>
+    </div>
+    <div class="breadth" id="br"></div>
+    <div class="mu" id="bt" style="margin:-6px 0 10px;font-size:12px"></div>
+    <div class="tw">
+      <table>
+        <thead><tr><th>Pair</th><th>Price</th><th>Win rate</th><th>Direction</th><th>Buy / s</th><th>Sell / s</th><th>Price move</th><th>Price check</th></tr></thead>
+        <tbody id="tb"></tbody>
+      </table>
+    </div>
+  </section>
+</div>
+
+<script>
+const CFG = {DEAD: 2, STRONG: 15, VERY: 35, MOVE: 1, CHART: 300, N: 100}; // |win rate %| thresholds, price move in bps, chart seconds, pair count
+const $ = id => document.getElementById(id);
+const CAT = 'linear'; // perpetuals only
+let W = 30, sel = 'ALL', sort = 'strong', flt = 'sig', list = [], map = {}, ws, timer, allHist = [], gen = 0;
+
+const SEGS = {
+  wins: [[5, '5s'], [10, '10s'], [30, '30s'], [60, '60s']],
+  flt: [['sig', 'Signals'], ['long', 'Long'], ['short', 'Short'], ['abs', 'Absorbed'], ['all', 'All']],
+  srt: [['strong', 'Strongest'], ['buyers', 'Top long'], ['sellers', 'Top short'], ['vol', 'Volume']]
+};
+const cur = () => ({wins: W, flt, srt: sort});
+function segs(){
+  for (const id in SEGS){
+    const el = $(id); el.innerHTML = '';
+    for (const [v, l] of SEGS[id]){
+      const b = document.createElement('button'); b.textContent = l; b.className = cur()[id] === v ? 'on' : '';
+      b.onclick = () => { if (id === 'wins') W = v; else if (id === 'flt') flt = v; else sort = v; segs(); tick(); };
+      el.appendChild(b);
+    }
+  }
+}
+
+// Used only if Bybit's ticker list cannot be fetched (blocked or offline). Major perpetuals, not ranked by volume.
+const FALLBACK = ('BTC ETH SOL XRP DOGE ADA AVAX LINK BNB LTC DOT TRX SUI APT ARB OP NEAR ATOM INJ TIA SEI FIL UNI AAVE ETC BCH XLM HBAR TON 1000SHIB 1000PEPE WIF 1000BONK 1000FLOKI RUNE MKR LDO STX IMX FET RENDER GRT ALGO VET ICP SAND MANA AXS GALA APE CRV SNX COMP 1INCH DYDX PENDLE JUP PYTH W ENA ONDO STRK TAO WLD ORDI JTO NOT EIGEN POPCAT MEW PNUT ACT GOAT MOODENG TRUMP VIRTUAL FARTCOIN PENGU HYPE KAITO IP S MOVE ME BERA LAYER USUAL ZRO ZK BLUR MASK ENS GMT LUNC TURBO BOME DOGS CAKE JASMY CHZ KAS XMR EOS').split(' ').map(x => x + 'USDT');
+let fallback = false, loadErr = '';
+
+async function load(){
+  const my = ++gen; clearTimeout(timer); if (ws){ ws.onclose = null; ws.close(); }
+  list = []; map = {}; allHist = []; sel = 'ALL'; fallback = false; loadErr = ''; setStatus('Loading top 100', false);
+  let items = null;
+  for (const base of ['https://api.bybit.com', 'https://api.bytick.com']){
+    try {
+      const r = await fetch(`${base}/v5/market/tickers?category=${CAT}`), j = await r.json();
+      if (my !== gen) return;
+      if (!j.result || !j.result.list) throw new Error(j.retMsg || 'unexpected response');
+      items = j.result.list.filter(x => /^[A-Z0-9]+USDT$/.test(x.symbol)).sort((a, b) => b.turnover24h - a.turnover24h).slice(0, CFG.N);
+      if (items.length) break;
+    } catch (e){ loadErr = String(e.message || e); }
+  }
+  if (my !== gen) return;
+  if (!items || !items.length){ fallback = true; items = FALLBACK.map(s => ({symbol: s, turnover24h: 0, lastPrice: 0})); }
+  list = items.map(x => ({s: x.symbol, turn: +x.turnover24h, trades: [], hist: [], last: +x.lastPrice, b: 0, sl: 0, tot: 0, wr: 0, bps: 0, sig: null}));
+  list.forEach(d => map[d.s] = d); connect(my);
+}
+
+function connect(my){
+  clearTimeout(timer); if (ws){ ws.onclose = null; ws.close(); }
+  ws = new WebSocket(`wss://stream.bybit.com/v5/public/${CAT}`);
+  ws.onopen = () => {
+    setStatus(fallback ? `Live, ${list.length} pairs (built-in list)` : `Live, ${list.length} pairs`, true);
+    const a = list.map(d => 'publicTrade.' + d.s);
+    const n = fallback ? 1 : 10; // one at a time on the built-in list so an unknown symbol cannot fail a batch
+    for (let i = 0; i < a.length; i += n) setTimeout(() => ws.readyState === 1 && ws.send(JSON.stringify({op: 'subscribe', args: a.slice(i, i + n)})), i * (fallback ? 30 : 8));
+  };
+  ws.onmessage = e => {
+    const m = JSON.parse(e.data);
+    if (!m.topic || !m.topic.startsWith('publicTrade')) return;
+    const now = Date.now() / 1000;
+    for (const t of m.data){ const d = map[t.s]; if (!d) continue; const p = +t.p; d.last = p; d.trades.push({t: now, s: t.S, u: +t.v * p, p}); } // S = taker side
+  };
+  ws.onclose = () => { if (my !== gen) return; setStatus('Reconnecting', false); timer = setTimeout(() => connect(my), 3000); };
+  ws.onerror = () => ws.close();
+}
+function setStatus(t, live){ $('status').textContent = t; $('pill').className = 'pill' + (live ? ' live' : ''); }
+setInterval(() => { if (ws && ws.readyState === 1) ws.send('{"op":"ping"}'); }, 20000);
+
+const rank = a => a >= CFG.VERY ? 'very strong' : a >= CFG.STRONG ? 'strong' : 'weak';
+const cp = n => { const a = Math.abs(n); return a >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : a >= 1e3 ? (n / 1e3).toFixed(1) + 'K' : Math.round(n) + ''; };
+const sgn = (n, d = 1) => (n > 0 ? '+' : n < 0 ? '−' : '') + Math.abs(n).toFixed(d);
+const px = p => !p ? '-' : p >= 100 ? p.toLocaleString(undefined, {maximumFractionDigits: 2}) : p >= 1 ? p.toFixed(4) : p.toPrecision(4);
+
+function signal(wr, bps){
+  if (Math.abs(wr) < CFG.STRONG) return null;
+  const buy = wr > 0, mv = buy ? bps : -bps, who = buy ? 'Buyers' : 'Sellers', other = buy ? 'sellers' : 'buyers';
+  if (mv >= CFG.MOVE) return {k: 'ok', h: 'Confirmed', d: `Price is following ${who.toLowerCase()} (${sgn(bps)} bps).`};
+  if (mv <= -CFG.MOVE) return {k: 'div', h: 'Divergence', d: `${who} winning but price is going the other way (${sgn(bps)} bps).`};
+  return {k: 'abs', h: 'Absorbed', d: `${who} pushing but price is flat (${sgn(bps)} bps). Limit ${other} are absorbing.`};
+}
+
+function tick(){
+  const now = Date.now() / 1000; let AB = 0, AS = 0, nb = 0, ns = 0, nbal = 0, nid = 0;
+  for (const d of list){
+    const tr = d.trades; while (tr.length && now - tr[0].t > W) tr.shift();
+    let b = 0, s = 0; for (const x of tr) x.s === 'Buy' ? b += x.u : s += x.u;
+    d.b = b / W; d.sl = s / W; d.tot = b + s; d.wr = d.tot ? (b - s) / d.tot * 100 : 0;
+    d.bps = tr.length > 1 ? (tr[tr.length - 1].p - tr[0].p) / tr[0].p * 1e4 : 0;
+    d.sig = signal(d.wr, d.bps);
+    d.hist.push({t: now, wr: d.wr, abs: !!d.sig && d.sig.k === 'abs'}); if (d.hist.length > CFG.CHART + 10) d.hist.shift();
+    AB += b; AS += s;
+    if (!d.tot) nid++; else if (d.wr >= CFG.STRONG) nb++; else if (d.wr <= -CFG.STRONG) ns++; else nbal++;
+  }
+  const awr = AB + AS ? (AB - AS) / (AB + AS) * 100 : 0;
+  allHist.push({t: now, wr: awr, abs: false}); if (allHist.length > CFG.CHART + 10) allHist.shift();
+
+  const d = map[sel], all = !d || sel === 'ALL';
+  const v = all ? {wr: awr, b: AB / W, s: AS / W, tot: AB + AS, hist: allHist, sig: {k: null, h: 'Market wide flow', d: `Long signals on ${nb} pairs, short signals on ${ns}, ${nbal} without a strong signal, ${nid} quiet.`}}
+              : {wr: d.wr, b: d.b, s: d.sl, tot: d.tot, hist: d.hist, sig: d.sig || {k: null, h: d.tot ? 'No strong flow' : 'Waiting for trades', d: 'Nothing to compare against price right now.'}};
+  hero(v, all, d, nb, ns, now);
+  $('br').innerHTML = [[nb, 'linear-gradient(90deg,#00c27a,#b8ff6a)'], [nbal, 'var(--mut)'], [ns, 'linear-gradient(90deg,#ff8a5c,#ff3d6e)']]
+    .map(([n, c]) => `<i style="width:${n / Math.max(1, list.length) * 100}%;background:${c}"></i>`).join('');
+  $('bt').textContent = (fallback ? `Could not load Bybit’s pair list (${loadErr || 'no response'}), so this is a built-in list of major pairs and not the live top 100 by volume. ` : '') + `Long ${nb}, short ${ns}, no strong signal ${nbal}, quiet ${nid} (no trades in ${W}s)`;
+  table();
+}
+
+function hero(v, all, d, nb, ns, now){
+  const a = Math.abs(v.wr), calm = a < CFG.DEAD, wr = v.wr;
+  $('ct').textContent = all ? `Market, all ${list.length} pairs` : d.s; $('back').style.display = all ? 'none' : 'block';
+  $('wr').textContent = sgn(wr) + '%'; $('wr').style.color = calm ? 'var(--fg)' : wr > 0 ? 'var(--g)' : 'var(--r)';
+  const bd = $('badge'); bd.style.display = v.tot && a >= CFG.STRONG ? 'inline-block' : 'none'; // weak is hidden on purpose
+  bd.className = 'badge' + (wr > 0 ? ' up' : ' dn'); bd.textContent = `${wr > 0 ? 'Long' : 'Short'}, ${rank(a)}`;
+  const th = Math.PI - (wr + 100) / 200 * Math.PI, x = 100 + 80 * Math.cos(th), y = 100 - 80 * Math.sin(th);
+  $('arc').setAttribute('d', `M100 20A80 80 0 0 ${wr >= 0 ? 1 : 0} ${x.toFixed(2)} ${y.toFixed(2)}`);
+  $('arc').setAttribute('stroke', wr >= 0 ? 'url(#gG)' : 'url(#gR)');
+  $('tip').setAttribute('cx', x.toFixed(2)); $('tip').setAttribute('cy', y.toFixed(2));
+  const f = $('fill'); f.style.background = wr >= 0 ? 'linear-gradient(90deg,#00c27a,#b8ff6a)' : 'linear-gradient(270deg,#ff3d6e,#ff8a5c)';
+  f.style.left = (wr >= 0 ? 50 : 50 + wr / 2) + '%'; f.style.width = a / 2 + '%';
+  $('b').textContent = cp(v.b); $('s').textContent = cp(v.s); $('n').textContent = (v.b - v.s < 0 ? '−' : '+') + cp(Math.abs(v.b - v.s));
+  $('x1l').textContent = all ? 'Strong long and short pairs' : 'Price move'; $('x1').textContent = all ? `${nb} long, ${ns} short` : sgn(d.bps) + ' bps';
+  const sg = $('sig'); sg.innerHTML = `<strong>${v.sig.h}</strong><span>${v.sig.d}</span>`;
+  sg.style.borderLeftColor = !v.sig.k ? (calm ? 'var(--mut)' : wr > 0 ? 'var(--g)' : 'var(--r)') : v.sig.k === 'ok' ? 'var(--g)' : v.sig.k === 'abs' ? 'var(--am)' : 'var(--r)';
+  draw(v.hist, now);
+}
+
+function table(){
+  const key = d => d.tot === 0 && sort !== 'vol' ? -1e9 : sort === 'strong' ? Math.abs(d.wr) : sort === 'buyers' ? d.wr : sort === 'sellers' ? -d.wr : d.turn;
+  const q = $('q').value.trim().toUpperCase();
+  const rows = list.filter(d => (!q || d.s.includes(q)) && (flt === 'all' || (flt === 'sig' && d.tot && Math.abs(d.wr) >= CFG.STRONG) || (flt === 'long' && d.wr >= CFG.STRONG) || (flt === 'short' && d.wr <= -CFG.STRONG) || (flt === 'abs' && d.sig && d.sig.k === 'abs')))
+    .sort((a, b) => key(b) - key(a));
+  $('tb').innerHTML = rows.map(d => {
+    const a = Math.abs(d.wr), calm = a < CFG.DEAD, c = !d.tot || calm ? 'mu' : d.wr > 0 ? 'up' : 'dn';
+    const bar = `<b style="left:${d.wr >= 0 ? 50 : 50 + d.wr / 2}%;width:${a / 2}%;background:${d.wr >= 0 ? 'linear-gradient(90deg,#00c27a,#b8ff6a)' : 'linear-gradient(270deg,#ff3d6e,#ff8a5c)'}"></b>`;
+    const sc = d.sig ? (d.sig.k === 'ok' ? 'up' : d.sig.k === 'abs' ? 'am' : 'dn') : 'mu';
+    return `<tr data-s="${d.s}" class="${sel === d.s ? 'sel' : ''}"><td class="pr">${d.s.replace('USDT', '')}<small>USDT</small></td><td>${px(d.last)}</td>
+      <td><span class="mb">${bar}<i></i></span><span class="${c}">${d.tot ? sgn(d.wr) + '%' : '-'}</span></td>
+      <td class="${d.tot && a >= CFG.STRONG ? c : 'mu'}">${d.tot && a >= CFG.STRONG ? (d.wr > 0 ? 'Long, ' : 'Short, ') + rank(a) : '-'}</td>
+      <td>${cp(d.b)}</td><td>${cp(d.sl)}</td><td>${d.tot ? sgn(d.bps) + ' bps' : '-'}</td><td class="${sc}">${d.sig ? d.sig.h : '-'}</td></tr>`;
+  }).join('') || `<tr><td colspan="8" class="mu" style="text-align:center;padding:24px">${list.length ? (flt === 'sig' ? 'No strong long or short signals right now.' : 'No pairs match right now.') : 'Loading the pair list from Bybit…'}</td></tr>`;
+}
+
+function draw(hist, now){
+  const cv = $('cv'), dpr = window.devicePixelRatio || 1, w = cv.clientWidth, h = cv.clientHeight;
+  cv.width = w * dpr; cv.height = h * dpr;
+  const c = cv.getContext('2d'); c.scale(dpr, dpr);
+  const st = getComputedStyle(document.documentElement), V = n => st.getPropertyValue(n).trim();
+  const L = 36, R = 8, T = 8, B = 22, pw = w - L - R, ph = h - T - B;
+  const X = t => L + (t - (now - CFG.CHART)) / CFG.CHART * pw, Y = v => T + (100 - v) / 200 * ph, y0 = Y(0);
+  c.font = '500 11px "Plus Jakarta Sans",system-ui'; c.fillStyle = V('--mut'); c.textAlign = 'right'; c.textBaseline = 'middle';
+  for (const v of [100, CFG.VERY, CFG.STRONG, 0, -CFG.STRONG, -CFG.VERY, -100]){
+    c.strokeStyle = v === 0 ? V('--mut') : V('--line'); c.lineWidth = v === 0 ? 1.4 : 1;
+    c.setLineDash(v === 0 || Math.abs(v) === 100 ? [] : [3, 5]);
+    c.beginPath(); c.moveTo(L, Y(v)); c.lineTo(w - R, Y(v)); c.stroke(); c.fillText(v, L - 6, Y(v));
+  }
+  c.setLineDash([]); c.textAlign = 'left'; c.textBaseline = 'top'; c.fillText('5 min ago', L, h - B + 7); c.textAlign = 'right'; c.fillText('now', w - R, h - B + 7);
+  const pts = hist.filter(p => p.t >= now - CFG.CHART); if (pts.length < 2) return;
+  const area = (rgb, up) => {
+    const g = c.createLinearGradient(0, y0, 0, up ? T : T + ph); g.addColorStop(0, `rgba(${rgb},0)`); g.addColorStop(1, `rgba(${rgb},.5)`);
+    c.save(); c.beginPath(); c.rect(L, up ? T : y0, pw, up ? y0 - T : T + ph - y0); c.clip(); c.beginPath(); c.moveTo(X(pts[0].t), y0);
+    for (const p of pts) c.lineTo(X(p.t), Y(p.wr)); c.lineTo(X(pts[pts.length - 1].t), y0); c.closePath(); c.fillStyle = g; c.fill(); c.restore();
+  };
+  area('25,240,139', true); area('255,77,115', false);
+  const lg = c.createLinearGradient(0, T, 0, T + ph);
+  lg.addColorStop(0, '#b8ff6a'); lg.addColorStop(.25, '#19f08b'); lg.addColorStop(.499, '#00c27a'); lg.addColorStop(.501, '#ff5d84'); lg.addColorStop(1, '#ff3d6e');
+  c.strokeStyle = lg; c.lineWidth = 2.2; c.lineJoin = 'round'; c.shadowColor = 'rgba(25,240,139,.5)'; c.shadowBlur = 8; c.beginPath();
+  pts.forEach((p, i) => i ? c.lineTo(X(p.t), Y(p.wr)) : c.moveTo(X(p.t), Y(p.wr))); c.stroke(); c.shadowBlur = 0;
+  c.strokeStyle = V('--am'); c.lineWidth = 2.2;
+  for (const p of pts) if (p.abs){ const x = X(p.t), y = Y(p.wr); c.beginPath(); c.moveTo(x - 4, y - 4); c.lineTo(x + 4, y + 4); c.moveTo(x + 4, y - 4); c.lineTo(x - 4, y + 4); c.stroke(); }
+}
+
+$('tb').onclick = e => { const tr = e.target.closest('tr[data-s]'); if (tr){ sel = tr.dataset.s; tick(); window.scrollTo({top: 0, behavior: 'smooth'}); } };
+$('back').onclick = () => { sel = 'ALL'; tick(); };
+$('q').oninput = table;
+segs(); setInterval(tick, 1000); load();
+</script>
+</body>
+</html>
