@@ -50,7 +50,7 @@ input{width:130px;background:var(--track);color:var(--fg);border:0;border-radius
 .st small{color:var(--mut);font-size:12px}
 .st b{display:block;font-size:18px;font-weight:700;letter-spacing:-.02em}
 .sig{margin-top:10px;border-radius:12px;padding:10px 12px;border:1px solid var(--line);border-left:4px solid var(--mut)}
-.sig strong{display:block}.sig span{color:var(--mut);font-size:13px}
+.sig strong{display:block}.sig span{display:block;margin-top:4px;color:var(--mut);font-size:13px}
 .ch{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:8px;margin-bottom:10px}
 h2{margin:0;font-size:15px;font-weight:700}
 .back{background:var(--track);display:none}
@@ -61,10 +61,10 @@ canvas{width:100%;height:300px;display:block}
 .breadth i{display:block;transition:width .5s}
 .tools{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between}
 .tw{max-height:640px;overflow:auto;border-radius:10px}
-table{border-collapse:collapse;width:100%;min-width:780px}
+table{border-collapse:collapse;width:100%;min-width:1180px}
 th{position:sticky;top:0;background:var(--card);text-align:right;color:var(--mut);font-weight:600;font-size:12px;padding:8px 10px;border-bottom:1px solid var(--line);z-index:1}
 td{text-align:right;padding:8px 10px;border-bottom:1px solid var(--line);font-weight:500}
-th:first-child,td:first-child{text-align:left}th:nth-child(3),td:nth-child(3){text-align:left}
+th:first-child,td:first-child{text-align:left}.scan th:nth-child(3),.scan td:nth-child(3){text-align:left}
 tr[data-s]{cursor:pointer}tr[data-s]:hover,tr.sel{background:color-mix(in srgb,var(--track) 60%,transparent)}
 .pr{font-weight:700}.pr small{color:var(--mut);font-weight:500;margin-left:3px}
 .mb{position:relative;width:110px;height:8px;border-radius:4px;background:var(--track);overflow:hidden;display:inline-block;vertical-align:middle;margin-right:8px}
@@ -81,6 +81,7 @@ tr[data-s]{cursor:pointer}tr[data-s]:hover,tr.sel{background:color-mix(in srgb,v
       <div><h1>Top 100 order flow</h1><p>Bybit USDT perpetuals by 24h volume: market buys versus market sells</p></div>
     </div>
     <div class="ctl">
+      <div class="seg" id="hor" title="How long dominance has to hold"></div>
       <div class="seg" id="wins"></div>
       <div class="pill" id="pill"><i></i><span id="status">Loading</span></div>
     </div>
@@ -109,6 +110,7 @@ tr[data-s]{cursor:pointer}tr[data-s]:hover,tr.sel{background:color-mix(in srgb,v
         <div class="st"><small id="x1l">Price move</small><b id="x1">0</b></div>
       </div>
       <div class="sig" id="sig"><strong>Loading pairs</strong><span>Fetching the top 100 by 24h volume.</span></div>
+      <div class="sig" id="ml"></div>
     </div>
     <div class="card">
       <div class="ch">
@@ -132,11 +134,24 @@ tr[data-s]{cursor:pointer}tr[data-s]:hover,tr.sel{background:color-mix(in srgb,v
     <div class="breadth" id="br"></div>
     <div class="mu" id="bt" style="margin:-6px 0 10px;font-size:12px"></div>
     <div class="tw">
-      <table>
-        <thead><tr><th>Pair</th><th>Price</th><th>Win rate</th><th>Direction</th><th>Buy / s</th><th>Sell / s</th><th>Price move</th><th>Price check</th></tr></thead>
+      <table class="scan">
+        <thead><tr><th>Pair</th><th>Price</th><th>Win rate</th><th>Direction</th><th>Held for</th><th>Chance to hold</th><th>Buy / s</th><th>Sell / s</th><th>Price move</th><th>Price check</th><th>Positioning</th><th>Funding</th></tr></thead>
         <tbody id="tb"></tbody>
       </table>
     </div>
+  </section>
+  <section class="card">
+    <div class="tools">
+      <div><h2>Signal scorecard</h2><div class="mu" id="scn" style="font-size:12px"></div></div>
+      <button class="back" id="reset" style="display:block">Reset scorecard</button>
+    </div>
+    <div class="tw" style="max-height:none;margin-top:10px">
+      <table style="min-width:640px">
+        <thead><tr><th>Signal group</th><th>Signals</th><th>30s win</th><th>30s avg</th><th>1m win</th><th>1m avg</th><th>5m win</th><th>5m avg</th></tr></thead>
+        <tbody id="sc"></tbody>
+      </table>
+    </div>
+    <p class="mu" style="font-size:12px;margin:10px 0 0">A signal is logged when a pair’s run first reaches strong, and again if it reaches very strong. Return is measured from the price at that moment in the signal’s direction: a long gains when price rises, a short when it falls. Green averages beat the assumed round-trip fee of 11 bps, amber is positive but smaller than the fee, red is negative. Numbers stay grey until a group has 30 signals. Past results do not guarantee future results.</p>
   </section>
 </div>
 
@@ -144,23 +159,155 @@ tr[data-s]{cursor:pointer}tr[data-s]:hover,tr.sel{background:color-mix(in srgb,v
 const CFG = {DEAD: 2, STRONG: 15, VERY: 35, MOVE: 1, CHART: 300, N: 100}; // |win rate %| thresholds, price move in bps, chart seconds, pair count
 const $ = id => document.getElementById(id);
 const CAT = 'linear'; // perpetuals only
-let W = 30, sel = 'ALL', sort = 'strong', flt = 'sig', list = [], map = {}, ws, timer, allHist = [], gen = 0;
+let W = 30, H = 60, sel = 'ALL', sort = 'strong', flt = 'sig', list = [], map = {}, ws, timer, allHist = [], gen = 0;
 
 const SEGS = {
-  wins: [[5, '5s'], [10, '10s'], [30, '30s'], [60, '60s']],
+  hor: [[30, 'Hold 30s'], [60, 'Hold 60s'], [120, 'Hold 120s']], wins: [[5, '5s'], [10, '10s'], [30, '30s'], [60, '60s']],
   flt: [['sig', 'Signals'], ['long', 'Long'], ['short', 'Short'], ['abs', 'Absorbed'], ['all', 'All']],
-  srt: [['strong', 'Strongest'], ['buyers', 'Top long'], ['sellers', 'Top short'], ['vol', 'Volume']]
+  srt: [['strong', 'Strongest'], ['buyers', 'Top long'], ['sellers', 'Top short'], ['run', 'Longest run'], ['vol', 'Volume']]
 };
-const cur = () => ({wins: W, flt, srt: sort});
+const cur = () => ({hor: H, wins: W, flt, srt: sort});
 function segs(){
   for (const id in SEGS){
     const el = $(id); el.innerHTML = '';
     for (const [v, l] of SEGS[id]){
       const b = document.createElement('button'); b.textContent = l; b.className = cur()[id] === v ? 'on' : '';
-      b.onclick = () => { if (id === 'wins') W = v; else if (id === 'flt') flt = v; else sort = v; segs(); tick(); };
+      b.onclick = () => { if (id === 'hor'){ H = v; resetModel(); } else if (id === 'wins') W = v; else if (id === 'flt') flt = v; else sort = v; segs(); tick(); };
       el.appendChild(b);
     }
   }
+}
+
+// ---- Dominance learning: runs live in your browser, nothing is sent anywhere ----
+// A "run" is a stretch where one side stays at or above the strong level (a short dip of up to GRACE seconds is forgiven).
+// 1) Past runs give the typical length and "how many runs this long lasted another H seconds".
+// 2) A small online logistic regression learns, from every run it watches, the chance the current run holds another H seconds.
+const GRACE = 3, MINN = 60;
+let pool = [], pending = [], sid = 0, M = {w: [0, 0, 0, 0, 0], n: 0, hit: 0, pos: 0}, saveT = 0;
+const sigm = z => 1 / (1 + Math.exp(-z)), dot = (a, b) => a.reduce((s, v, i) => s + v * b[i], 0);
+const fmtDur = t => { t = Math.round(t); return t < 60 ? t + 's' : Math.floor(t / 60) + 'm ' + (t % 60) + 's'; };
+const age = (d, now) => d.streak ? now - d.streak.start + 1 : 0;
+const med = a => { const s = a.map(r => r.dur).sort((x, y) => x - y); return s[Math.floor(s.length / 2)]; };
+const runs = (d, side) => { const own = d.streaks.filter(r => r.side === side); return own.length >= 8 ? own : pool.filter(r => r.side === side); };
+function feat(d, now){
+  return [1, Math.abs(d.wr) / 100, Math.log1p(age(d, now)) / Math.log1p(300), Math.max(-1, Math.min(1, d.streak.side * d.bps / 10)), Math.min(d.trades.length / W, 20) / 20];
+}
+const predict = (d, now) => d.streak ? sigm(dot(M.w, feat(d, now))) : null;
+function resetModel(){
+  pending = []; M = {w: [0, 0, 0, 0, 0], n: 0, hit: 0, pos: 0};
+  try { const s = JSON.parse(localStorage.getItem('flowML_H' + H) || 'null'); if (s && s.w && s.w.length === 5) M = s; } catch (e){}
+  list.forEach(d => { d.lastSample = 0; });
+}
+function trackStreak(d, now){
+  const sd = d.tot && Math.abs(d.wr) >= CFG.STRONG ? Math.sign(d.wr) : 0;
+  if (d.streak){
+    if (sd === d.streak.side){ d.streak.last = now; d.lost = 0; }
+    else if (++d.lost > GRACE){
+      const r = {side: d.streak.side, dur: d.streak.last - d.streak.start + 1};
+      if (r.dur >= 2){ d.streaks.push(r); if (d.streaks.length > 30) d.streaks.shift(); pool.push(r); if (pool.length > 600) pool.shift(); }
+      d.streak = null;
+    }
+  }
+  if (!d.streak && sd){ d.streak = {id: ++sid, side: sd, start: now, last: now}; d.lost = 0; }
+}
+function learn(now){
+  for (const d of list) if (d.streak && now - d.lastSample >= 5){ d.lastSample = now; pending.push({t: now, d, id: d.streak.id, x: feat(d, now)}); }
+  while (pending.length && now - pending[0].t >= H){
+    const q = pending.shift(), y = q.d.streak && q.d.streak.id === q.id ? 1 : 0, p = sigm(dot(M.w, q.x));
+    M.n++; M.pos += y; if ((p >= .5) === (y === 1)) M.hit++; // judged before it learns from this sample
+    M.w = M.w.map((w, i) => w - .05 * ((p - y) * q.x[i] + .001 * w));
+  }
+  if (now - saveT > 30){ saveT = now; try { localStorage.setItem('flowML_H' + H, JSON.stringify(M)); localStorage.setItem('flowBook', JSON.stringify(book)); } catch (e){} }
+}
+function domCells(d){
+  if (!d.streak) return '<td class="mu">-</td><td class="mu">-</td>';
+  const now = Date.now() / 1000, p = predict(d, now), ok = M.n >= MINN;
+  return `<td class="${d.streak.side > 0 ? 'up' : 'dn'}">${fmtDur(age(d, now))}</td><td class="${!ok ? 'mu' : p >= .6 ? 'up' : p <= .4 ? 'dn' : 'am'}">${ok ? Math.round(p * 100) + '%' : 'Learning'}</td>`;
+}
+function mlText(d, hs, now){
+  let L = 0, S = 0, cl = 0, cs = 0, bl = 0, bs = 0;
+  for (const p of hs){
+    if (p.wr >= CFG.STRONG){ L++; cl++; bl = Math.max(bl, cl); cs = 0; } else if (p.wr <= -CFG.STRONG){ S++; cs++; bs = Math.max(bs, cs); cl = 0; } else cl = cs = 0;
+  }
+  const n = Math.max(1, hs.length), pc = v => Math.round(v / n * 100) + '%';
+  let out = `<strong>Dominance over the last ${fmtDur(hs.length)}</strong><span>Long dominated ${pc(L)} of the time, short ${pc(S)}. Longest runs: long ${fmtDur(bl)}, short ${fmtDur(bs)}.</span>`;
+  if (d && d.streak){
+    const side = d.streak.side, a = age(d, now), src = runs(d, side), alive = src.filter(r => r.dur >= a), p = predict(d, now);
+    out += `<span>${side > 0 ? 'Long' : 'Short'} for ${fmtDur(a)} so far.${src.length >= 3 ? ` Typical past run: ${fmtDur(med(src))}.` : ''}</span>`
+      + `<span>${M.n >= MINN ? `Model: ${Math.round(p * 100)}% chance it holds another ${H}s.` : `Model is still learning (${M.n} of ${MINN} checks).`}`
+      + (alive.length >= 5 ? ` Past runs this long: ${Math.round(alive.filter(r => r.dur >= a + H).length / alive.length * 100)}% lasted another ${H}s (${alive.length} runs).` : '') + '</span>';
+  }
+  const oc = d ? oiChg(d, now) : null;
+  if (d && (oc !== null || d.fr != null)) out += `<span>${oc !== null ? `Open interest ${oc >= 0 ? 'up' : 'down'} ${Math.abs(oc).toFixed(2)}% over the last few minutes.` : ''}${d.fr != null ? ` Funding rate ${(d.fr * 100).toFixed(4)}%.` : ''}</span>`;
+  const acc = M.n ? Math.round(M.hit / M.n * 100) : 0, base = M.n ? Math.round(Math.max(M.pos, M.n - M.pos) / M.n * 100) : 0;
+  return out + `<span>Model check: ${M.n} predictions, ${acc}% right, against ${base}% for always guessing the common outcome.</span>`;
+}
+
+// ---- Scorecard: what did price do after each strong signal? ----
+const HZ = [30, 60, 300], FEE_BPS = 11, MINSC = 30, OI_FLAT = 0.02; // fee: assumed round trip at standard taker rates; OI_FLAT in percent
+let book = [], pendingSig = [], tickN = 0, apiBase = null, pollT = null;
+try { book = JSON.parse(localStorage.getItem('flowBook') || '[]'); } catch (e){}
+function oiChg(d, now){
+  const h = d.oi; if (h.length < 2) return null;
+  const last = h[h.length - 1]; let ref = null;
+  for (let i = h.length - 2; i >= 0; i--) if (h[i].t <= now - 180){ ref = h[i]; break; }
+  if (!ref && last.t - h[0].t >= 60) ref = h[0];
+  return ref && ref.v ? (last.v - ref.v) / ref.v * 100 : null;
+}
+function posLabel(d, side, now){
+  const c = oiChg(d, now); if (c === null) return 'No OI data';
+  if (Math.abs(c) < OI_FLAT) return 'Flat OI';
+  return side > 0 ? (c > 0 ? 'Fresh longs' : 'Short covering') : (c > 0 ? 'Fresh shorts' : 'Longs closing');
+}
+function posCells(d){
+  const now = Date.now() / 1000, f = d.fr == null ? '-' : (d.fr * 100).toFixed(4) + '%';
+  const fc = d.fr != null && Math.abs(d.fr) >= 0.0005 ? 'am' : 'mu';
+  if (!d.streak) return `<td class="mu">-</td><td class="${fc}">${f}</td>`;
+  const l = posLabel(d, d.streak.side, now), c = l === 'Fresh longs' ? 'up' : l === 'Fresh shorts' ? 'dn' : l === 'No OI data' || l === 'Flat OI' ? 'mu' : 'am';
+  return `<td class="${c}">${l}</td><td class="${fc}">${f}</td>`;
+}
+function logSignal(d, now){
+  const st = d.streak; if (!st || !d.tot || !d.last) return;
+  const vs = Math.abs(d.wr) >= CFG.VERY, rank = vs ? 'Very strong' : 'Strong';
+  const add = () => pendingSig.push({t: now, s: d.s, side: st.side, rank, kind: d.sig ? d.sig.h : 'No check', pos: posLabel(d, st.side, now), p0: d.last, r: [null, null, null]});
+  if (!st.l1){ st.l1 = true; if (vs) st.l2 = true; if (now - (d.lastLog || 0) >= 20){ d.lastLog = now; add(); } }
+  else if (vs && !st.l2){ st.l2 = true; add(); }
+}
+function evalSignals(now){
+  for (let i = pendingSig.length - 1; i >= 0; i--){
+    const q = pendingSig[i], d = map[q.s];
+    if (!d || !d.last){ if (now - q.t > 300) pendingSig.splice(i, 1); continue; }
+    HZ.forEach((h, k) => { if (q.r[k] === null && now - q.t >= h) q.r[k] = q.side * (d.last - q.p0) / q.p0 * 1e4; });
+    if (q.r[2] !== null){ pendingSig.splice(i, 1); book.push({t: q.t, s: q.s, side: q.side, rank: q.rank, kind: q.kind, pos: q.pos, r: q.r}); if (book.length > 4000) book.shift(); }
+  }
+}
+const GROUPS = [['All signals', () => true], ['Long', r => r.side > 0], ['Short', r => r.side < 0], ['Strong', r => r.rank === 'Strong'], ['Very strong', r => r.rank === 'Very strong'],
+  ['Confirmed by price', r => r.kind === 'Confirmed'], ['Absorbed', r => r.kind === 'Absorbed'], ['Divergence', r => r.kind === 'Divergence'],
+  ['Fresh longs (OI rising)', r => r.pos === 'Fresh longs'], ['Short covering (OI falling)', r => r.pos === 'Short covering'],
+  ['Fresh shorts (OI rising)', r => r.pos === 'Fresh shorts'], ['Longs closing (OI falling)', r => r.pos === 'Longs closing']];
+function scorecard(){
+  $('scn').textContent = `${book.length} finished signals, ${pendingSig.length} still being measured`;
+  $('sc').innerHTML = GROUPS.map(([name, f]) => {
+    const rs = book.filter(f), n = rs.length;
+    const cells = [0, 1, 2].map(k => {
+      if (n < 5) return '<td class="mu">-</td><td class="mu">-</td>';
+      const v = rs.map(r => r.r[k]), w = v.filter(x => x > 0).length / n * 100, avg = v.reduce((a, b) => a + b, 0) / n, ok = n >= MINSC;
+      return `<td class="${!ok ? 'mu' : w >= 55 ? 'up' : w <= 45 ? 'dn' : 'mu'}">${w.toFixed(0)}%</td><td class="${!ok ? 'mu' : avg > FEE_BPS ? 'up' : avg > 0 ? 'am' : 'dn'}">${sgn(avg)} bps</td>`;
+    }).join('');
+    return `<tr><td class="pr">${name}</td><td>${n}</td>${cells}</tr>`;
+  }).join('');
+}
+async function poll(){
+  if (!apiBase) return; const my = gen;
+  try {
+    const j = await (await fetch(`${apiBase}/v5/market/tickers?category=${CAT}`)).json(); if (my !== gen) return;
+    const now = Date.now() / 1000;
+    for (const x of j.result.list){
+      const d = map[x.symbol]; if (!d) continue;
+      d.fr = x.fundingRate === '' || x.fundingRate == null ? null : +x.fundingRate;
+      const v = +x.openInterestValue; if (v > 0){ d.oi.push({t: now, v}); if (d.oi.length > 80) d.oi.shift(); }
+    }
+  } catch (e){}
 }
 
 // Used only if Bybit's ticker list cannot be fetched (blocked or offline). Major perpetuals, not ranked by volume.
@@ -169,7 +316,7 @@ let fallback = false, loadErr = '';
 
 async function load(){
   const my = ++gen; clearTimeout(timer); if (ws){ ws.onclose = null; ws.close(); }
-  list = []; map = {}; allHist = []; sel = 'ALL'; fallback = false; loadErr = ''; setStatus('Loading top 100', false);
+  list = []; map = {}; allHist = []; pool = []; pending = []; sel = 'ALL'; fallback = false; loadErr = ''; apiBase = null; clearInterval(pollT); setStatus('Loading top 100', false);
   let items = null;
   for (const base of ['https://api.bybit.com', 'https://api.bytick.com']){
     try {
@@ -177,13 +324,13 @@ async function load(){
       if (my !== gen) return;
       if (!j.result || !j.result.list) throw new Error(j.retMsg || 'unexpected response');
       items = j.result.list.filter(x => /^[A-Z0-9]+USDT$/.test(x.symbol)).sort((a, b) => b.turnover24h - a.turnover24h).slice(0, CFG.N);
-      if (items.length) break;
+      if (items.length){ apiBase = base; break; }
     } catch (e){ loadErr = String(e.message || e); }
   }
   if (my !== gen) return;
   if (!items || !items.length){ fallback = true; items = FALLBACK.map(s => ({symbol: s, turnover24h: 0, lastPrice: 0})); }
-  list = items.map(x => ({s: x.symbol, turn: +x.turnover24h, trades: [], hist: [], last: +x.lastPrice, b: 0, sl: 0, tot: 0, wr: 0, bps: 0, sig: null}));
-  list.forEach(d => map[d.s] = d); connect(my);
+  list = items.map(x => ({s: x.symbol, turn: +x.turnover24h, trades: [], hist: [], last: +x.lastPrice, b: 0, sl: 0, tot: 0, wr: 0, bps: 0, sig: null, streak: null, lost: 0, streaks: [], lastSample: 0, fr: null, oi: []}));
+  list.forEach(d => map[d.s] = d); connect(my); poll(); pollT = setInterval(poll, 15000);
 }
 
 function connect(my){
@@ -227,11 +374,12 @@ function tick(){
     let b = 0, s = 0; for (const x of tr) x.s === 'Buy' ? b += x.u : s += x.u;
     d.b = b / W; d.sl = s / W; d.tot = b + s; d.wr = d.tot ? (b - s) / d.tot * 100 : 0;
     d.bps = tr.length > 1 ? (tr[tr.length - 1].p - tr[0].p) / tr[0].p * 1e4 : 0;
-    d.sig = signal(d.wr, d.bps);
+    d.sig = signal(d.wr, d.bps); trackStreak(d, now); logSignal(d, now);
     d.hist.push({t: now, wr: d.wr, abs: !!d.sig && d.sig.k === 'abs'}); if (d.hist.length > CFG.CHART + 10) d.hist.shift();
     AB += b; AS += s;
     if (!d.tot) nid++; else if (d.wr >= CFG.STRONG) nb++; else if (d.wr <= -CFG.STRONG) ns++; else nbal++;
   }
+  evalSignals(now); learn(now); if (tickN++ % 5 === 0) scorecard();
   const awr = AB + AS ? (AB - AS) / (AB + AS) * 100 : 0;
   allHist.push({t: now, wr: awr, abs: false}); if (allHist.length > CFG.CHART + 10) allHist.shift();
 
@@ -261,11 +409,12 @@ function hero(v, all, d, nb, ns, now){
   $('x1l').textContent = all ? 'Strong long and short pairs' : 'Price move'; $('x1').textContent = all ? `${nb} long, ${ns} short` : sgn(d.bps) + ' bps';
   const sg = $('sig'); sg.innerHTML = `<strong>${v.sig.h}</strong><span>${v.sig.d}</span>`;
   sg.style.borderLeftColor = !v.sig.k ? (calm ? 'var(--mut)' : wr > 0 ? 'var(--g)' : 'var(--r)') : v.sig.k === 'ok' ? 'var(--g)' : v.sig.k === 'abs' ? 'var(--am)' : 'var(--r)';
+  $('ml').innerHTML = mlText(all ? null : d, v.hist, now);
   draw(v.hist, now);
 }
 
 function table(){
-  const key = d => d.tot === 0 && sort !== 'vol' ? -1e9 : sort === 'strong' ? Math.abs(d.wr) : sort === 'buyers' ? d.wr : sort === 'sellers' ? -d.wr : d.turn;
+  const key = d => d.tot === 0 && sort !== 'vol' ? -1e9 : sort === 'strong' ? Math.abs(d.wr) : sort === 'buyers' ? d.wr : sort === 'sellers' ? -d.wr : sort === 'run' ? (d.streak ? Date.now() / 1000 - d.streak.start : -1) : d.turn;
   const q = $('q').value.trim().toUpperCase();
   const rows = list.filter(d => (!q || d.s.includes(q)) && (flt === 'all' || (flt === 'sig' && d.tot && Math.abs(d.wr) >= CFG.STRONG) || (flt === 'long' && d.wr >= CFG.STRONG) || (flt === 'short' && d.wr <= -CFG.STRONG) || (flt === 'abs' && d.sig && d.sig.k === 'abs')))
     .sort((a, b) => key(b) - key(a));
@@ -276,8 +425,8 @@ function table(){
     return `<tr data-s="${d.s}" class="${sel === d.s ? 'sel' : ''}"><td class="pr">${d.s.replace('USDT', '')}<small>USDT</small></td><td>${px(d.last)}</td>
       <td><span class="mb">${bar}<i></i></span><span class="${c}">${d.tot ? sgn(d.wr) + '%' : '-'}</span></td>
       <td class="${d.tot && a >= CFG.STRONG ? c : 'mu'}">${d.tot && a >= CFG.STRONG ? (d.wr > 0 ? 'Long, ' : 'Short, ') + rank(a) : '-'}</td>
-      <td>${cp(d.b)}</td><td>${cp(d.sl)}</td><td>${d.tot ? sgn(d.bps) + ' bps' : '-'}</td><td class="${sc}">${d.sig ? d.sig.h : '-'}</td></tr>`;
-  }).join('') || `<tr><td colspan="8" class="mu" style="text-align:center;padding:24px">${list.length ? (flt === 'sig' ? 'No strong long or short signals right now.' : 'No pairs match right now.') : 'Loading the pair list from Bybit…'}</td></tr>`;
+      ${domCells(d)}<td>${cp(d.b)}</td><td>${cp(d.sl)}</td><td>${d.tot ? sgn(d.bps) + ' bps' : '-'}</td><td class="${sc}">${d.sig ? d.sig.h : '-'}</td>${posCells(d)}</tr>`;
+  }).join('') || `<tr><td colspan="12" class="mu" style="text-align:center;padding:24px">${list.length ? (flt === 'sig' ? 'No strong long or short signals right now.' : 'No pairs match right now.') : 'Loading the pair list from Bybit…'}</td></tr>`;
 }
 
 function draw(hist, now){
@@ -311,8 +460,9 @@ function draw(hist, now){
 
 $('tb').onclick = e => { const tr = e.target.closest('tr[data-s]'); if (tr){ sel = tr.dataset.s; tick(); window.scrollTo({top: 0, behavior: 'smooth'}); } };
 $('back').onclick = () => { sel = 'ALL'; tick(); };
+$('reset').onclick = () => { book = []; pendingSig = []; try { localStorage.removeItem('flowBook'); } catch (e){} scorecard(); };
 $('q').oninput = table;
-segs(); setInterval(tick, 1000); load();
+segs(); resetModel(); setInterval(tick, 1000); load();
 </script>
 </body>
 </html>
