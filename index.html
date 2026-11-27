@@ -80,7 +80,7 @@ tr[data-s]{cursor:pointer}tr[data-s]:hover,tr.sel{background:color-mix(in srgb,v
   <header class="card">
     <div class="brand">
       <div class="logo"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#032015" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12h4l3-8 5 16 3-8h5"/></svg></div>
-      <div><h1>Buyers vs sellers</h1><p>Live trading on Bybit’s 100 busiest USDT futures pairs</p></div>
+      <div><h1>Buyers vs sellers</h1><p>Live trading on Bybit’s 100 busiest USDT spot pairs</p></div>
     </div>
     <div class="ctl">
       <span class="mu cap">Look back</span><div class="seg" id="wins"></div>
@@ -157,7 +157,7 @@ tr[data-s]{cursor:pointer}tr[data-s]:hover,tr.sel{background:color-mix(in srgb,v
     <div class="tw" style="max-height:none;margin-top:6px"><table style="min-width:620px">
       <thead><tr><th>Pair</th><th>Trade</th><th>Entered at</th><th>Exited at</th><th>How it ended</th><th>Result after fees</th><th>Time to fill</th></tr></thead>
       <tbody id="simlog"></tbody></table></div>
-    <p class="mu" style="font-size:12px;margin:10px 0 0">How it works (perpetuals, 10x): it first confirms a direction. If a pair is going up, it posts a limit buy at the best price, which fills when sellers hit it, then tries to sell higher at your profit target. If a pair is going down, it posts a limit sell and tries to buy back lower. If price runs against it by your stop loss, or 2 minutes pass, it closes at the market price. Fees used: 0.02% per side for resting orders and 0.055% for market orders (Bybit’s standard perp rates). There is no borrowing or hourly interest, and funding is ignored because trades are held for minutes. Every trade uses 10x leverage: $500 of your money controls a $5,000 position, so gains, losses and fees are 10 times bigger relative to the $500. If price moves about 9% against a position it is liquidated and the $500 is lost; the stop loss normally exits long before that. Percentages in the tables are of the full position, and dollar amounts are real gains and losses on your money. Fill chance comes from the amount queued ahead of us at the best price and how fast market orders have been hitting that side over the last 30 seconds. Real trading is usually worse: we cannot see our true place in the queue, orders ahead may cancel, there is delay, and the exit order is assumed to have nobody ahead of it. Neither a clear direction nor a high fill chance guarantees profit. This is for testing ideas, not advice.</p>
+    <p class="mu" style="font-size:12px;margin:10px 0 0">How it works (spot margin, 10x): it first confirms a direction. If a pair is going up, it posts a margin buy limit order at the best price, which fills when sellers hit it, then tries to sell higher at your profit target. If a pair is going down, it borrows the coin and posts a margin sell, then tries to buy it back lower and repay. If price runs against it by your stop loss, or 5 minutes pass, it closes at the market price. Fees used: 0.1% per side for both resting and market orders (Bybit’s standard spot rate), so a round trip costs 0.2% of the position before you make anything, which is why targets start at 0.3%. Every trade uses 10x leverage: $500 of your money controls a $5,000 position, so gains, losses, fees and interest are 10 times bigger relative to the $500 (the 0.2% round-trip fee is 2% of it). Longs borrow the extra $4,500 of USDT and shorts borrow $5,000 of the coin. Interest is assumed at 0.001% per hour with any started hour charged in full; the real rate varies by coin and day, and interest also accrues on an unfilled order until it is cancelled. If price moves about 9% against a position it is liquidated and the $500 is lost; the stop loss normally exits long before that. Pairs are not filtered to margin-eligible coins or checked for 10x availability, so confirm a coin can be borrowed at that leverage before trusting a result. Percentages in the tables are of the full position, and dollar amounts are real gains and losses on your money. Fill chance comes from the amount queued ahead of us at the best price and how fast market orders have been hitting that side over the last 30 seconds. Real trading is usually worse: we cannot see our true place in the queue, orders ahead may cancel, there is delay, and the exit order is assumed to have nobody ahead of it. Neither a clear direction nor a high fill chance guarantees profit. This is for testing ideas, not advice.</p>
   </section>
 
   <section class="card">
@@ -184,7 +184,7 @@ tr[data-s]{cursor:pointer}tr[data-s]:hover,tr.sel{background:color-mix(in srgb,v
 <script>
 const CFG = {DEAD: 2, STRONG: 15, VERY: 35, MOVE: 1, CHART: 300, N: 100}; // |win rate %| thresholds, price move in bps, chart seconds, pair count
 const $ = id => document.getElementById(id);
-const CAT = 'linear'; // USDT perpetuals; the practice trading simulates 10x perp trades
+const CAT = 'spot'; // spot market; the practice trading simulates 10x spot margin (long = margin buy, short = borrow the coin and margin sell)
 let W = 30, sel = '', sort = 'strong', flt = 'sig', list = [], map = {}, ws, timer, gen = 0;
 
 const SEGS = {
@@ -198,14 +198,14 @@ function segs(){
     const el = $(id); el.innerHTML = '';
     for (const [v, l] of SEGS[id]){
       const b = document.createElement('button'); b.textContent = l; b.className = cur()[id] === v ? 'on' : '';
-      b.onclick = () => { if (id === 'wins') W = v; else if (id === 'flt') flt = v; else if (id === 'obr') obR = v; else if (id === 'obg') obG = v; else if (id === 'simt') SIM.tg = v; else if (id === 'sims') SIM.sl = v; else if (id === 'simp') SIM.minP = v; else sort = v; segs(); tick(); };
+      b.onclick = () => { if (id === 'wins') W = v; else if (id === 'flt') flt = v; else if (id === 'obr') obR = v; else if (id === 'obg') obG = v; else if (id === 'simt') SIM.tg = v; else if (id === 'sims') SIM.sl = v; else if (id === 'simp') SIM.minP = v; else sort = v; if (window.REMOTE && id.startsWith('sim')) cmd({tg: SIM.tg, sl: SIM.sl, minP: SIM.minP}); segs(); tick(); };
       el.appendChild(b);
     }
   }
 }
 const fmtDur = t => { t = Math.round(t); return t < 60 ? t + 's' : Math.floor(t / 60) + 'm ' + (t % 60) + 's'; };
 
-// Used only if Bybit's ticker list cannot be fetched (blocked or offline). Major perpetuals, not ranked by volume.
+// Used only if Bybit's ticker list cannot be fetched (blocked or offline). Major pairs (some names may not exist on spot), not ranked by volume.
 const FALLBACK = ('BTC ETH SOL XRP DOGE ADA AVAX LINK BNB LTC DOT TRX SUI APT ARB OP NEAR ATOM INJ TIA SEI FIL UNI AAVE ETC BCH XLM HBAR TON 1000SHIB 1000PEPE WIF 1000BONK 1000FLOKI RUNE MKR LDO STX IMX FET RENDER GRT ALGO VET ICP SAND MANA AXS GALA APE CRV SNX COMP 1INCH DYDX PENDLE JUP PYTH W ENA ONDO STRK TAO WLD ORDI JTO NOT EIGEN POPCAT MEW PNUT ACT GOAT MOODENG TRUMP VIRTUAL FARTCOIN PENGU HYPE KAITO IP S MOVE ME BERA LAYER USUAL ZRO ZK BLUR MASK ENS GMT LUNC TURBO BOME DOGS CAKE JASMY CHZ KAS XMR EOS').split(' ').map(x => x + 'USDT');
 let fallback = false, loadErr = '';
 
@@ -332,7 +332,8 @@ function pcDraw(now){
   c.font = '500 11px "Plus Jakarta Sans",system-ui'; c.textBaseline = 'middle';
   c.fillStyle = V('--mut'); c.textAlign = 'left'; c.fillText('5 min ago', L, h - 8); c.textAlign = 'right'; c.fillText('now', w - R, h - 8);
   if (pts.length < 2){ c.textAlign = 'center'; c.fillText('Collecting data…', w / 2, h / 2); return; }
-  let lo = Math.min(...pts.map(x => x.p)), hi = Math.max(...pts.map(x => x.p)); const pad = Math.max((hi - lo) * .12, hi * 1e-4); lo -= pad; hi += pad;
+  const ex = [...SIM.marks.filter(m => m.s === d.s && m.t >= now - CFG.CHART), ...SIM.open.filter(q => q.s === d.s)].map(m => m.px);
+  let lo = Math.min(...pts.map(x => x.p), ...ex), hi = Math.max(...pts.map(x => x.p), ...ex); const pad = Math.max((hi - lo) * .12, hi * 1e-4); lo -= pad; hi += pad;
   const rmax = Math.max(1, ...pts.map(x => Math.max(x.b, x.s))) * 1.1;
   const sc = [[lo, hi], [-100, 100], [0, rmax]], Y = (i, v) => ys[i] + hs[i] - (v - sc[i][0]) / (sc[i][1] - sc[i][0]) * hs[i];
   const names = ['Price', 'Balance: buyers vs sellers %', 'Money traded per second'], ticks = [[hi, (lo + hi) / 2, lo], [100, 0, -100], [rmax, rmax / 2, 0]];
@@ -354,6 +355,15 @@ function pcDraw(now){
   c.strokeStyle = '#19f08b'; c.lineWidth = 2; path(2, q => q.b); c.stroke();
   c.strokeStyle = '#ff4d73'; c.lineWidth = 1.6; path(2, q => q.s); c.stroke(); // sell rate
   const q = pts[pts.length - 1]; c.fillStyle = V('--fg'); c.beginPath(); c.arc(X(q.t), Y(0, q.p), 3.5, 0, 7); c.fill();
+  // our limit orders: a star where each order fills (dashed line = how long it waited), dot for exits, x for cancels, and a live star on the order still waiting
+  const dash = (t0, t1, y) => { c.setLineDash([4, 4]); c.lineWidth = 1.5; c.strokeStyle = STAR; c.beginPath(); c.moveTo(Math.max(L, X(t0)), y); c.lineTo(X(t1), y); c.stroke(); c.setLineDash([]); };
+  c.save(); c.beginPath(); c.rect(L, ys[0], pw, hs[0]); c.clip();
+  for (const m of SIM.marks){ if (m.s !== d.s || m.t < now - CFG.CHART) continue; const x = X(m.t), y = Y(0, m.px); dash(m.t0, m.t, y);
+    if (m.k === 'fill') star(c, x, y, 9, STAR); else if (m.k === 'exit'){ c.beginPath(); c.arc(x, y, 4.5, 0, 7); c.fillStyle = m.up ? '#19f08b' : '#ff4d73'; c.fill(); c.lineWidth = 1.5; c.strokeStyle = '#06222b'; c.stroke(); }
+    else { c.strokeStyle = STAR; c.lineWidth = 2; c.beginPath(); c.moveTo(x - 4, y - 4); c.lineTo(x + 4, y + 4); c.moveTo(x + 4, y - 4); c.lineTo(x - 4, y + 4); c.stroke(); } }
+  for (const o of SIM.open){ if (o.s !== d.s) continue; const y = Y(0, o.px), x = X(now) - 12, r = 6 + 5 * Math.max(0, Math.min(1, o.rem / (o.rem0 || o.rem)));
+    dash(o.stage === 'entry' ? o.t0 : o.tF, now, y); pulse(c, x, y, r, now - (o.hitT || -9)); star(c, x, y, r, o.stage === 'entry' ? STAR : 'rgba(34,211,238,.25)'); }
+  c.restore();
 }
 
 // ---- Limit order depth: live book for one pair, how fast market orders eat it ----
@@ -405,6 +415,9 @@ function obWalls(now, bk, d){
     }
   }
 }
+const STAR = '#22d3ee', mark = m => { SIM.marks.push(m); if (SIM.marks.length > 200) SIM.marks.shift(); };
+function star(c, x, y, r, fill){ c.beginPath(); for (let i = 0; i < 10; i++){ const a = -Math.PI / 2 + i * Math.PI / 5, q = i % 2 ? r * .45 : r; c[i ? 'lineTo' : 'moveTo'](x + q * Math.cos(a), y + q * Math.sin(a)); } c.closePath(); c.fillStyle = fill; c.fill(); c.lineWidth = 1.6; c.lineJoin = 'round'; c.strokeStyle = '#06222b'; c.stroke(); }
+function pulse(c, x, y, r, age){ if (age < 1.2){ c.beginPath(); c.arc(x, y, r + age * 16, 0, 7); c.lineWidth = 2; c.strokeStyle = STAR; c.globalAlpha = 1 - age / 1.2; c.stroke(); c.globalAlpha = 1; } }
 function obDraw(now, bk){
   const cv = $('obcv'), dpr = window.devicePixelRatio || 1, w = cv.clientWidth, h = cv.clientHeight;
   cv.width = w * dpr; cv.height = h * dpr; const c = cv.getContext('2d'); c.scale(dpr, dpr);
@@ -435,9 +448,23 @@ function obDraw(now, bk){
   if (g){ c.setLineDash([4, 4]); c.lineWidth = 1.3; c.strokeStyle = 'rgba(255,182,39,.95)'; line(gb); c.stroke(); line(ga); c.stroke(); c.setLineDash([]); }
   c.strokeStyle = V('--fg'); c.globalAlpha = .4; c.setLineDash([2, 4]); c.beginPath(); c.moveTo(X(bk.mid), T); c.lineTo(X(bk.mid), T + ph); c.stroke(); c.setLineDash([]); c.globalAlpha = 1;
   for (const [p, cc, col] of [[xmin, last(bp), '#19f08b'], [xmax, last(ap), '#ff4d73']]){ c.fillStyle = col; c.beginPath(); c.arc(X(p), Y(cc), 4, 0, 7); c.fill(); }
-  const so = SIM.open.find(q => q.s === OB.sym); if (so && so.px >= xmin && so.px <= xmax){
-    const x = X(so.px), r = x > w / 2; c.strokeStyle = c.fillStyle = '#a78bfa'; c.lineWidth = 2; c.beginPath(); c.moveTo(x, T); c.lineTo(x, T + ph); c.stroke();
-    c.textAlign = r ? 'right' : 'left'; c.textBaseline = 'top'; c.fillText(so.stage === 'entry' ? 'Our order' : 'Our exit order', x + (r ? -5 : 5), T + 2);
+  const so = SIM.open.find(q => q.s === OB.sym); if (so){ // our order: dashed outline = queue + our size when placed, faint = queue still ahead of us, solid = our own part
+    const N = SIM.size * SIM.lev, sell = so.side === 'sell', pts = sell ? ap : bp, ahead = Math.max(0, so.rem - N), mine = Math.min(N, Math.max(0, so.rem)), tot0 = so.rem0 || so.rem;
+    c.font = '600 11px "Plus Jakarta Sans",system-ui'; c.textBaseline = 'top'; c.strokeStyle = c.fillStyle = '#a78bfa';
+    if (so.px >= xmin && so.px <= xmax){
+      const x = X(so.px), r = x > w / 2; let prev = 0; for (const [p, cc] of pts){ if (sell ? p >= so.px : p <= so.px) break; prev = cc; }
+      const yT = v => Math.max(T, Math.min(Y(prev), Y(prev + v) - 0)), bw = 12;
+      c.lineWidth = 1.5; c.beginPath(); c.moveTo(x, T); c.lineTo(x, T + ph); c.globalAlpha = .45; c.stroke(); c.globalAlpha = 1;
+      c.setLineDash([3, 3]); c.strokeRect(x - bw / 2, yT(tot0), bw, Y(prev) - yT(tot0)); c.setLineDash([]);
+      c.globalAlpha = .35; c.fillRect(x - bw / 2, yT(ahead + mine), bw, Y(prev) - yT(ahead + mine)); c.globalAlpha = 1;
+      c.fillRect(x - bw / 2, yT(ahead + mine), bw, Math.max(3, Y(prev + ahead) - yT(ahead + mine)));
+      const eaten = Math.max(0, Math.min(100, Math.round((1 - so.rem / tot0) * 100)));
+      const sy = Math.max(T + 9, Math.min(T + ph - 9, Y(prev + ahead + mine / 2))), sr = 7 + 5 * Math.max(0, Math.min(1, so.rem / tot0));
+      pulse(c, x, sy, sr, now - (so.hitT || -9)); star(c, x, sy, sr, so.stage === 'entry' ? STAR : 'rgba(34,211,238,.25)'); c.fillStyle = '#a78bfa';
+      c.textAlign = r ? 'right' : 'left'; const tx = x + (r ? -18 : 18);
+      c.fillText((so.stage === 'entry' ? (sell ? 'Our sell order' : 'Our buy order') : 'Our exit order') + ' at ' + px(so.px), tx, T + 2);
+      c.font = '500 11px "Plus Jakarta Sans",system-ui'; c.fillText(ahead > 0 ? cp(ahead) + ' ahead of us, ' + eaten + '% eaten' : 'Queue eaten, ' + Math.round(mine / N * 100) + '% of ours left', tx, T + 16);
+    } else { c.textAlign = 'right'; c.fillText('Our order at ' + px(so.px) + ' is outside this range, widen it to see it', w - R, T + 2); }
   }
   c.fillStyle = V('--fg'); c.textBaseline = 'top';
   [[xmin, 'left', 'Lowest buy order'], [bk.mid, 'center', 'Price now'], [xmax, 'right', 'Highest sell order']].forEach(([p, al, cap]) => {
@@ -477,9 +504,9 @@ function obStep(){
 }
 
 // ---- Practice trading: pretend orders on every pair, filled by the real trades we watch ----
-const SIM = {on: true, open: [], done: [], curve: [], t0: 0, rt: 0, cap0: 10000, cap: 10000, saved: 0, size: 500, lev: 10, maxOpen: 20, wait: 20, hold: 120, tg: 10, sl: 20, minP: .85, confirm: 10, pend: 0, placed: 0, filled: 0, cancelled: 0, pSum: 0, n: 0, wins: 0, net: 0, cand: 0, skip: 0, watch: 0};
-const FEE_M = 2, FEE_T = 5.5; // bps per side: Bybit standard 0.02% for resting orders, 0.055% for market orders
-SEGS.simt = [[5, '0.05%'], [10, '0.1%'], [20, '0.2%']]; SEGS.sims = [[10, '0.1%'], [20, '0.2%'], [40, '0.4%']]; SEGS.simp = [[.7, '70%'], [.85, '85%'], [.95, '95%']];
+const SIM = {on: true, open: [], marks: [], done: [], curve: [], t0: 0, rt: 0, cap0: 10000, cap: 10000, saved: 0, size: 500, lev: 10, maxOpen: 20, wait: 20, hold: 300, tg: 50, sl: 50, minP: .85, confirm: 10, pend: 0, placed: 0, filled: 0, cancelled: 0, pSum: 0, n: 0, wins: 0, net: 0, cand: 0, skip: 0, watch: 0};
+const FEE_M = 10, FEE_T = 10, BORROW_H = 0.1; // bps: Bybit spot fee is 0.1% for makers and takers (non-VIP); assumed borrow interest 0.1 bps (0.001%) per hour, any started hour counts as a full hour
+SEGS.simt = [[30, '0.3%'], [50, '0.5%'], [100, '1%']]; SEGS.sims = [[30, '0.3%'], [50, '0.5%'], [100, '1%']]; SEGS.simp = [[.7, '70%'], [.85, '85%'], [.95, '95%']];
 function bookMsg(m){
   const x = m.data, d = x && map[x.s]; if (!d) return; const b = d.bk || (d.bk = {bp: 0, bq: 0, ap: 0, aq: 0, t: 0});
   if (m.type === 'snapshot') b.bp = b.bq = b.ap = b.aq = 0;
@@ -494,30 +521,32 @@ function simHit(o, x){ // 0 = no effect, 1 = traded at our price (eats the queue
   return near(x.p, o.px) ? 1 : 0;
 }
 function simReset(now){
-  Object.assign(SIM, {open: [], done: [], curve: [], t0: now, rt: 0, cap: SIM.cap0, saved: 0, placed: 0, filled: 0, cancelled: 0, pSum: 0, n: 0, wins: 0, net: 0});
+  Object.assign(SIM, {open: [], marks: [], done: [], curve: [], t0: now, rt: 0, cap: SIM.cap0, saved: 0, placed: 0, filled: 0, cancelled: 0, pSum: 0, n: 0, wins: 0, net: 0});
   list.forEach(d => { d.fl = []; d.scan = now; d.cool = 0; d.dir = 0; d.dirT = now; });
 }
 function simClose(o, xPx, how, maker, now){
-  const g = (o.pos === 'long' ? 1 : -1) * (xPx - o.ePx) / o.ePx * 1e4, net = how === 'liquidated' ? -1e4 / SIM.lev : g - FEE_M - (maker ? FEE_M : FEE_T) , usd = net / 1e4 * SIM.size * SIM.lev; // net is in bps of the whole position; a liquidation loses the whole margin
+  const g = (o.pos === 'long' ? 1 : -1) * (xPx - o.ePx) / o.ePx * 1e4, net = how === 'liquidated' ? -1e4 / SIM.lev : g - FEE_M - (maker ? FEE_M : FEE_T) - BORROW_H * (o.pos === 'short' ? 1 : (SIM.lev - 1) / SIM.lev) * Math.max(1, Math.ceil((now - o.t0) / 3600)), usd = net / 1e4 * SIM.size * SIM.lev; // net is in bps of the whole position; a liquidation loses the whole margin
   SIM.done.unshift({s: o.s, pos: o.pos, ePx: o.ePx, xPx, how, net, usd, fd: o.fd}); if (SIM.done.length > 10) SIM.done.pop();
-  SIM.n++; if (net > 0) SIM.wins++; SIM.net += net; if (usd > 0) SIM.saved += usd; else SIM.cap += usd; // profits are set aside, losses reduce trading capital
+  mark({s: o.s, k: 'exit', t: now, t0: how === 'target' ? o.tF : now, px: xPx, up: net > 0}); SIM.n++; if (net > 0) SIM.wins++; SIM.net += net; if (usd > 0) SIM.saved += usd; else SIM.cap += usd; // profits are set aside, losses reduce trading capital
   SIM.open = SIM.open.filter(q => q !== o); map[o.s].cool = now + 5;
 }
 function simFill(o, now){
   if (o.stage === 'exit') return simClose(o, o.px, 'target', true, now);
-  const long = o.pos === 'long'; SIM.filled++; o.fd = now - o.t0; o.ePx = o.px; o.tF = now; o.stage = 'exit';
-  o.side = long ? 'sell' : 'buy'; o.px = o.ePx * (1 + (long ? 1 : -1) * o.tg / 1e4); o.rem = SIM.size * SIM.lev;
+  const long = o.pos === 'long'; SIM.filled++; o.fd = now - o.t0; o.ePx = o.px; o.tF = now; mark({s: o.s, k: 'fill', t: now, t0: o.t0, px: o.ePx}); o.stage = 'exit';
+  o.side = long ? 'sell' : 'buy'; o.px = o.ePx * (1 + (long ? 1 : -1) * o.tg / 1e4); o.rem = o.rem0 = SIM.size * SIM.lev;
 }
 function simRun(now = Date.now() / 1000){
-  if (!list.length) return; if (!SIM.t0) simReset(now);
+  if (window.REMOTE || !list.length) return; // when served by server.js the trading runs on the server and this page only shows it
+  if (!SIM.t0){ simReset(now); simLoad(now); }
   const live = d => d.bk && d.bk.bp > 0 && d.bk.ap > d.bk.bp && now - d.bk.t < 5;
   for (const d of list){
+    if (!d.fl){ d.fl = []; d.scan = now; d.cool = 0; d.dir = 0; d.dirT = now; } // pairs that appear after a reload of the list
     const nt = d.trades.filter(x => x.t > d.scan); d.scan = now; if (nt.length) d.fl.push(...nt);
     while (d.fl.length && now - d.fl[0].t > 30) d.fl.shift();
     const o = SIM.open.find(q => q.s === d.s); if (!o) continue;
-    for (const x of nt){ if (!SIM.open.includes(o)) break; const h = simHit(o, x); if (h === 2) simFill(o, now); else if (h === 1){ o.rem -= x.u; if (o.rem <= 0) simFill(o, now); } }
+    for (const x of nt){ if (!SIM.open.includes(o)) break; const h = simHit(o, x); if (h === 2) simFill(o, now); else if (h === 1){ o.rem -= x.u; o.hitT = now; if (o.rem <= 0) simFill(o, now); } }
     if (!SIM.open.includes(o)) continue;
-    if (o.stage === 'entry'){ if (now - o.t0 > SIM.wait){ SIM.open = SIM.open.filter(q => q !== o); SIM.cancelled++; d.cool = now + 5;  } continue; }
+    if (o.stage === 'entry'){ if (now - o.t0 > SIM.wait){ SIM.open = SIM.open.filter(q => q !== o); SIM.cancelled++; d.cool = now + 5; mark({s: o.s, k: 'cancel', t: now, t0: o.t0, px: o.px}); SIM.cap -= SIM.size * SIM.lev * BORROW_H * (o.pos === 'short' ? 1 : (SIM.lev - 1) / SIM.lev) / 1e4;  } continue; }
     const adv = (o.pos === 'long' ? o.ePx - d.last : d.last - o.ePx) / o.ePx * 1e4, out = o.pos === 'long' ? (d.bk && d.bk.bp || d.last) : (d.bk && d.bk.ap || d.last);
     if (adv >= 9e3 / SIM.lev) simClose(o, out, 'liquidated', false, now); else if (adv >= o.sl) simClose(o, out, 'stop', false, now); else if (now - o.tF > SIM.hold) simClose(o, out, 'timeout', false, now);
   }
@@ -538,18 +567,56 @@ function simRun(now = Date.now() / 1000){
     cands.sort((x, y) => y.P - x.P);
     for (const c of cands){
       if (SIM.open.length >= SIM.maxOpen || SIM.cap - SIM.open.length * SIM.size < SIM.size) break;
-      const b = c.d.bk; SIM.open.push({s: c.d.s, pos: c.long ? 'long' : 'short', stage: 'entry', side: c.long ? 'buy' : 'sell', px: c.long ? b.bp : b.ap, rem: c.usd + SIM.size * SIM.lev, t0: now, tg: SIM.tg, sl: SIM.sl, P: c.P});
+      const b = c.d.bk; SIM.open.push({s: c.d.s, pos: c.long ? 'long' : 'short', stage: 'entry', side: c.long ? 'buy' : 'sell', px: c.long ? b.bp : b.ap, rem: c.usd + SIM.size * SIM.lev, rem0: c.usd + SIM.size * SIM.lev, t0: now, tg: SIM.tg, sl: SIM.sl, P: c.P});
       SIM.placed++; SIM.pSum += c.P;
     }
   }
   if (now - SIM.rt >= 1){ SIM.rt = now; simRender(now); }
 }
+// ---- Keep progress in this browser: close everything when the tab closes, pick up again on return ----
+const SAVE_KEY = 'flowsim.practice.v1', KEEP = ['cap', 'saved', 'placed', 'filled', 'cancelled', 'pSum', 'n', 'wins', 'net', 'done', 'curve', 'on'];
+function simSave(now = Date.now() / 1000){
+  if (window.REMOTE || !SIM.t0) return;
+  const st = {v: 1, at: now}; KEEP.forEach(k => st[k] = SIM[k]);
+  st.open = SIM.open.map(o => Object.assign({}, o, {mk: map[o.s] ? (o.pos === 'long' ? (map[o.s].bk && map[o.s].bk.bp || map[o.s].last) : (map[o.s].bk && map[o.s].bk.ap || map[o.s].last)) : o.px})); // last exit price, in case the browser kills the tab without warning
+  try { localStorage.setItem(SAVE_KEY, JSON.stringify(st)); } catch (e) {}
+}
+function simCloseAll(now, priceOf){ // cancels waiting orders and closes filled trades at the current exit price
+  let n = 0, usd = 0;
+  for (const o of SIM.open.slice()){
+    if (o.stage === 'entry'){ SIM.open = SIM.open.filter(q => q !== o); SIM.cancelled++; SIM.cap -= SIM.size * SIM.lev * BORROW_H * (o.pos === 'short' ? 1 : (SIM.lev - 1) / SIM.lev) / 1e4; continue; }
+    const before = SIM.cap + SIM.saved; simClose(o, priceOf(o), 'left', false, now); n++; usd += SIM.cap + SIM.saved - before;
+  }
+  return {n, usd};
+}
+function simLeave(){
+  if (window.REMOTE || !SIM.t0) return;
+  const now = Date.now() / 1000;
+  simCloseAll(now, o => { const d = map[o.s]; return o.pos === 'long' ? (d.bk && d.bk.bp || d.last) : (d.bk && d.bk.ap || d.last); });
+  simSave(now);
+}
+function simLoad(now){
+  let st; try { st = JSON.parse(localStorage.getItem(SAVE_KEY) || 'null'); } catch (e) {}
+  if (!st || st.v !== 1) return;
+  KEEP.forEach(k => { if (st[k] !== undefined) SIM[k] = st[k]; });
+  SIM.open = (st.open || []).filter(o => map[o.s]);
+  const r = simCloseAll(now, o => o.mk || o.px); // trades still open = the tab was killed before it could close them
+  const last = SIM.curve[SIM.curve.length - 1]; if (last){ const sh = now - last.t; SIM.curve.forEach(q => q.t += sh); } // hide the time away from the growth chart
+  const away = fmtDur(Math.max(0, now - st.at)), dol = v => (v >= 0 ? '+' : '−') + '$' + Math.abs(v).toFixed(2);
+  SIM.note = `Welcome back after ${away}. Balance restored from this browser${r.n ? `; ${r.n} trade${r.n > 1 ? 's' : ''} left open ${r.n > 1 ? 'were' : 'was'} closed at the last price seen (${dol(r.usd)})` : ''}. ${SIM.on ? 'New trades start once the 10-second measurement finishes.' : 'Press Resume to start trading again.'}`;
+  SIM.noteT = now + 30;
+  $('simgo').textContent = SIM.on ? 'Pause' : 'Resume'; $('simgo').className = SIM.on ? '' : 'on';
+}
+addEventListener('pagehide', simLeave);
+setInterval(() => simSave(), 3000);
+
 function simRender(now){
   const last = SIM.curve[SIM.curve.length - 1], total = SIM.cap + SIM.saved;
   if (!last || now - last.t >= 5){ SIM.curve.push({t: now, total, saved: SIM.saved}); if (SIM.curve.length > 1200) SIM.curve = SIM.curve.filter((_, i) => i % 2 === 0); }
   const cell = (l, v, c = '') => `<div class="st"><small>${l}</small><b class="${c}">${v}</b></div>`, pr = (a, b) => b ? Math.round(a / b * 100) + '%' : '-';
   const dol = (v, sg) => (sg ? (v > 0.005 ? '+' : v < -0.005 ? '−' : '') : v < 0 ? '−' : '') + '$' + Math.abs(v).toFixed(2), gr = (total - SIM.cap0) / SIM.cap0 * 100;
   $('simst').innerHTML = `<strong>${SIM.on ? 'Running automatically' : 'Paused'}</strong><span>${SIM.on ? (now - SIM.t0 < 10 ? 'Measuring trading speed for 10 seconds first.' : `Watching ${SIM.watch} pairs: ${SIM.cand} have a confirmed direction, ${SIM.pend} are still being confirmed, and ${SIM.skip} confirmed ones were skipped because the fill chance was below ${Math.round(SIM.minP * 100)}%.`) : 'Press Resume to carry on. Open orders keep their place.'}</span>`;
+  if (SIM.note && now < SIM.noteT) $('simst').innerHTML += `<span style="display:block;margin-top:4px">${SIM.note}</span>`;
   $('simst').style.borderLeftColor = SIM.on ? '#a78bfa' : 'var(--mut)';
   $('simss').innerHTML = cell('Total value', dol(total) + ` <small class="${gr >= 0 ? 'up' : 'dn'}">${sgn(gr, 2)}%</small>`) + cell('Profits set aside', dol(SIM.saved), SIM.saved > 0 ? 'up' : '')
     + cell('Trading capital', dol(SIM.cap) + ` <small class="mu">${dol(SIM.cap - SIM.open.length * SIM.size)} free</small>`) + cell('Open now', `${SIM.open.length} of ${SIM.maxOpen}`)
@@ -557,9 +624,9 @@ function simRender(now){
     + cell('Winning trades', `${SIM.wins} of ${SIM.n} <small class="mu">${pr(SIM.wins, SIM.n)}</small>`) + cell('Average result per trade', SIM.n ? pc(SIM.net / SIM.n) : '-', SIM.net > 0 ? 'up' : SIM.net < 0 ? 'dn' : '');
   $('simlive').innerHTML = SIM.open.map(o => { const nm = o.pos === 'long', e = o.stage === 'entry', d = map[o.s];
     const gain = e ? 0 : (nm ? 1 : -1) * (d.last - o.ePx) / o.ePx * 1e4;
-    return `<tr><td class="pr">${o.s.replace('USDT', '')}<small>USDT</small></td><td class="${nm ? 'up' : 'dn'}">${nm ? 'Buy, then sell' : 'Sell, then buy back'}</td><td>${px(o.px)}</td><td class="${e ? 'mu' : 'am'}">${e ? (nm ? 'Buy' : 'Sell') + ' order waiting' : 'Filled, waiting for target'}</td>
-      <td>${e ? `${Math.round(o.P * 100)}% fill chance, ${cp(Math.max(0, o.rem))} ahead, ${fmtDur(now - o.t0)} of ${SIM.wait}s` : `now ${pc(gain)} before fees, held ${fmtDur(now - o.tF)}`}</td></tr>`; }).join('') || '<tr><td colspan="5" class="mu" style="text-align:center;padding:18px">Nothing open right now.</td></tr>';
-  $('simlog').innerHTML = SIM.done.map(t => `<tr><td class="pr">${t.s.replace('USDT', '')}<small>USDT</small></td><td class="${t.pos === 'long' ? 'up' : 'dn'}">${t.pos === 'long' ? 'Buy, then sell' : 'Sell, then buy back'}</td><td>${px(t.ePx)}</td><td>${px(t.xPx)}</td><td>${t.how === 'target' ? 'Target hit' : t.how === 'stop' ? 'Stopped out' : t.how === 'liquidated' ? 'Liquidated' : 'Timed out'}</td><td class="${t.net > 0 ? 'up' : 'dn'}">${pc(t.net)} (${dol(t.usd, 1)})</td><td>${fmtDur(t.fd)}</td></tr>`).join('') || '<tr><td colspan="7" class="mu" style="text-align:center;padding:18px">No finished trades yet.</td></tr>';
+    return `<tr data-s="${o.s}" style="cursor:pointer" title="Tap to see this order on the order book curve"><td class="pr">${o.s.replace('USDT', '')}<small>USDT</small></td><td class="${nm ? 'up' : 'dn'}">${nm ? 'Buy, then sell' : 'Borrow, sell, buy back'}</td><td>${px(o.px)}</td><td class="${e ? 'mu' : 'am'}">${e ? (nm ? 'Buy' : 'Sell') + ' order waiting' : 'Filled, waiting for target'}</td>
+      <td>${e ? `${Math.round(o.P * 100)}% fill chance, ${cp(Math.max(0, o.rem - SIM.size * SIM.lev))} ahead, ${fmtDur(now - o.t0)} of ${SIM.wait}s` : `now ${pc(gain)} before fees, held ${fmtDur(now - o.tF)}`}</td></tr>`; }).join('') || '<tr><td colspan="5" class="mu" style="text-align:center;padding:18px">Nothing open right now.</td></tr>';
+  $('simlog').innerHTML = SIM.done.map(t => `<tr><td class="pr">${t.s.replace('USDT', '')}<small>USDT</small></td><td class="${t.pos === 'long' ? 'up' : 'dn'}">${t.pos === 'long' ? 'Buy, then sell' : 'Borrow, sell, buy back'}</td><td>${px(t.ePx)}</td><td>${px(t.xPx)}</td><td>${t.how === 'target' ? 'Target hit' : t.how === 'stop' ? 'Stopped out' : t.how === 'liquidated' ? 'Liquidated' : t.how === 'left' ? 'Closed when you left' : 'Timed out'}</td><td class="${t.net > 0 ? 'up' : 'dn'}">${pc(t.net)} (${dol(t.usd, 1)})</td><td>${fmtDur(t.fd)}</td></tr>`).join('') || '<tr><td colspan="7" class="mu" style="text-align:center;padding:18px">No finished trades yet.</td></tr>';
   simDraw(now);
 }
 function simDraw(now){
@@ -585,11 +652,14 @@ function simDraw(now){
   const up = pts[pts.length - 1].total >= SIM.cap0; line(0, q => q.total, up ? '#19f08b' : '#ff4d73'); line(1, q => q.saved, '#ffb627', 'rgba(255,182,39,.2)');
   c.fillStyle = V('--mut'); c.textAlign = 'left'; c.fillText('start', L, h - 8); c.textAlign = 'right'; c.fillText(fmtDur(span) + ' of practice', w - R, h - 8);
 }
-$('simgo').onclick = () => { SIM.on = !SIM.on; $('simgo').textContent = SIM.on ? 'Pause' : 'Resume'; $('simgo').className = SIM.on ? '' : 'on'; };
-$('simrs').onclick = () => simReset(Date.now() / 1000);
+$('simlive').onclick = e => { const tr = e.target.closest('tr[data-s]'); if (tr){ sel = tr.dataset.s; tick(); $('obcv').scrollIntoView({behavior: 'smooth', block: 'center'}); } };
+$('simgo').onclick = () => { if (window.REMOTE) return cmd({on: !SIM.on}); SIM.on = !SIM.on; $('simgo').textContent = SIM.on ? 'Pause' : 'Resume'; $('simgo').className = SIM.on ? '' : 'on'; };
+$('simrs').onclick = () => { if (window.REMOTE) return cmd({reset: 1}); simReset(Date.now() / 1000); SIM.note = ''; simSave(); };
 
 $('tb').onclick = e => { const tr = e.target.closest('tr[data-s]'); if (tr){ sel = tr.dataset.s; tick(); window.scrollTo({top: 0, behavior: 'smooth'}); } };
 $('q').oninput = table;
+const cmd = o => fetch('/api/cmd', {method: 'POST', body: JSON.stringify(o)}).then(r => { if (!r.ok) alert('Controls are disabled on this server (start it with ALLOW_CONTROL=1).'); });
+if (window.REMOTE) setInterval(async () => { try { Object.assign(SIM, await (await fetch('/api/state', {cache: 'no-store'})).json()); $('simgo').textContent = SIM.on ? 'Pause' : 'Resume'; $('simgo').className = SIM.on ? '' : 'on'; } catch (e) {} }, 2000);
 segs(); setInterval(tick, 1000); setInterval(() => simRun(), 500); setInterval(obStep, 500); load();
 </script>
 </body>
